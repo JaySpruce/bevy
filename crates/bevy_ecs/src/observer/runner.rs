@@ -422,7 +422,7 @@ fn hook_on_add<E: Event, B: Bundle, S: ObserverSystem<E, B>>(
 
         {
             let mut entity = world.entity_mut(entity);
-            if let crate::world::Entry::Vacant(entry) = entity.entry::<ObserverState>() {
+            if let crate::world::EntityEntryWorldMut::Vacant(entry) = entity.entry::<ObserverState>() {
                 entry.insert(ObserverState {
                     descriptor,
                     runner: observer_system_runner::<E, B, S>,

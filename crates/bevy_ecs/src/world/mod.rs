@@ -22,7 +22,7 @@ pub use component_constants::*;
 pub use deferred_world::DeferredWorld;
 pub use entity_fetch::WorldEntityFetch;
 pub use entity_ref::{
-    EntityMut, EntityMutExcept, EntityRef, EntityRefExcept, EntityWorldMut, Entry,
+    EntityMut, EntityMutExcept, EntityRef, EntityRefExcept, EntityWorldMut, EntityEntryWorldMut,
     FilteredEntityMut, FilteredEntityRef, OccupiedEntry, VacantEntry,
 };
 pub use filtered_resource::*;

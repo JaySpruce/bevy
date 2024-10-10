@@ -1832,14 +1832,14 @@ impl<'w> EntityWorldMut<'w> {
     /// entity.entry::<Comp>().and_modify(|mut c| c.0 += 1);
     /// assert_eq!(world.query::<&Comp>().single(&world).0, 5);
     /// ```
-    pub fn entry<'a, T: Component>(&'a mut self) -> Entry<'w, 'a, T> {
+    pub fn entry<'a, T: Component>(&'a mut self) -> EntityEntryWorldMut<'w, 'a, T> {
         if self.contains::<T>() {
-            Entry::Occupied(OccupiedEntry {
+            EntityEntryWorldMut::Occupied(OccupiedEntry {
                 entity_world: self,
                 _marker: PhantomData,
             })
         } else {
-            Entry::Vacant(VacantEntry {
+            EntityEntryWorldMut::Vacant(VacantEntry {
                 entity_world: self,
                 _marker: PhantomData,
             })
@@ -1893,14 +1893,14 @@ const QUERY_MISMATCH_ERROR: &str = "Query does not match the current entity";
 /// This `enum` can only be constructed from the [`entry`] method on [`EntityWorldMut`].
 ///
 /// [`entry`]: EntityWorldMut::entry
-pub enum Entry<'w, 'a, T: Component> {
+pub enum EntityEntryWorldMut<'w, 'a, T: Component> {
     /// An occupied entry.
     Occupied(OccupiedEntry<'w, 'a, T>),
     /// A vacant entry.
     Vacant(VacantEntry<'w, 'a, T>),
 }
 
-impl<'w, 'a, T: Component> Entry<'w, 'a, T> {
+impl<'w, 'a, T: Component> EntityEntryWorldMut<'w, 'a, T> {
     /// Provides in-place mutable access to an occupied entry.
     ///
     /// # Examples
@@ -1919,11 +1919,11 @@ impl<'w, 'a, T: Component> Entry<'w, 'a, T> {
     #[inline]
     pub fn and_modify<F: FnOnce(Mut<'_, T>)>(self, f: F) -> Self {
         match self {
-            Entry::Occupied(mut entry) => {
+            EntityEntryWorldMut::Occupied(mut entry) => {
                 f(entry.get_mut());
-                Entry::Occupied(entry)
+                EntityEntryWorldMut::Occupied(entry)
             }
-            Entry::Vacant(entry) => Entry::Vacant(entry),
+            EntityEntryWorldMut::Vacant(entry) => EntityEntryWorldMut::Vacant(entry),
         }
     }
 
@@ -1948,11 +1948,11 @@ impl<'w, 'a, T: Component> Entry<'w, 'a, T> {
     #[inline]
     pub fn insert_entry(self, component: T) -> OccupiedEntry<'w, 'a, T> {
         match self {
-            Entry::Occupied(mut entry) => {
+            EntityEntryWorldMut::Occupied(mut entry) => {
                 entry.insert(component);
                 entry
             }
-            Entry::Vacant(entry) => entry.insert_entry(component),
+            EntityEntryWorldMut::Vacant(entry) => entry.insert_entry(component),
         }
     }
 
@@ -1980,8 +1980,8 @@ impl<'w, 'a, T: Component> Entry<'w, 'a, T> {
     #[inline]
     pub fn or_insert(self, default: T) -> Mut<'a, T> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(default),
+            EntityEntryWorldMut::Occupied(entry) => entry.into_mut(),
+            EntityEntryWorldMut::Vacant(entry) => entry.insert(default),
         }
     }
 
@@ -2004,13 +2004,13 @@ impl<'w, 'a, T: Component> Entry<'w, 'a, T> {
     #[inline]
     pub fn or_insert_with<F: FnOnce() -> T>(self, default: F) -> Mut<'a, T> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(default()),
+            EntityEntryWorldMut::Occupied(entry) => entry.into_mut(),
+            EntityEntryWorldMut::Vacant(entry) => entry.insert(default()),
         }
     }
 }
 
-impl<'w, 'a, T: Component + Default> Entry<'w, 'a, T> {
+impl<'w, 'a, T: Component + Default> EntityEntryWorldMut<'w, 'a, T> {
     /// Ensures the entry has this component by inserting the default value if empty, and
     /// returns a mutable reference to this component in the entry.
     ///
@@ -2030,8 +2030,8 @@ impl<'w, 'a, T: Component + Default> Entry<'w, 'a, T> {
     #[inline]
     pub fn or_default(self) -> Mut<'a, T> {
         match self {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => entry.insert(Default::default()),
+            EntityEntryWorldMut::Occupied(entry) => entry.into_mut(),
+            EntityEntryWorldMut::Vacant(entry) => entry.insert(Default::default()),
         }
     }
 }
