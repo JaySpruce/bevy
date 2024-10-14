@@ -433,19 +433,10 @@ impl<'w, 's> Commands<'w, 's> {
     /// - [`get_entity`](Self::get_entity) for the fallible version.
     #[inline]
     #[track_caller]
-    pub fn entity(&mut self, entity: Entity) -> EntityCommands {
-        #[inline(never)]
-        #[cold]
-        #[track_caller]
-        fn panic_no_entity(entity: Entity) -> ! {
-            panic!(
-                "Attempting to create an EntityCommands for entity {entity:?}, which doesn't exist.",
-            );
-        }
-
-        match self.get_entity(entity) {
-            Some(entity) => entity,
-            None => panic_no_entity(entity),
+    pub fn entity<F: EntityCommandsFetch>(&mut self, entity: F) -> F::Commands<'_> {
+        match entity.fetch_commands(&self.entities, self.reborrow()) {
+            Ok(command) => command,
+            Err(entity) => panic!("Attempting to create an EntityCommands for entity {entity:?}, which doesn't exist."),
         }
     }
 
@@ -482,11 +473,8 @@ impl<'w, 's> Commands<'w, 's> {
     /// - [`entity`](Self::entity) for the panicking version.
     #[inline]
     #[track_caller]
-    pub fn get_entity(&mut self, entity: Entity) -> Option<EntityCommands> {
-        self.entities.contains(entity).then_some(EntityCommands {
-            entity,
-            commands: self.reborrow(),
-        })
+    pub fn get_entity<F: EntityCommandsFetch>(&mut self, entity: F) -> Option<F::Commands<'_>> {
+        entity.fetch_commands(&self.entities, self.reborrow()).ok()
     }
 
     /// Pushes a [`Command`] to the queue for creating entities with a particular [`Bundle`] type.
@@ -1660,6 +1648,179 @@ impl<'a> EntityCommands<'a> {
     }
 }
 
+pub trait EntityCommandsFetch {
+    type Commands<'a>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity>;
+}
+
+impl EntityCommandsFetch for Entity {
+    type Commands<'a> = EntityCommands<'a>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        if !entities.contains(self) {
+            return Err(self);
+        }
+        Ok(EntityCommands { entity: self, commands })
+    }
+}
+
+impl EntityCommandsFetch for &'_ [Entity] {
+    type Commands<'a> = EntityBatchCommands<'a>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        for entity in self.to_owned() {
+            if !entities.contains(entity) {
+                return Err(entity);
+            }
+        }
+        Ok(EntityBatchCommands {
+            entity_batch: self.to_owned(),
+            commands,
+        })
+    }
+}
+
+impl EntityCommandsFetch for Vec<Entity> {
+    type Commands<'a> = EntityBatchCommands<'a>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        for entity in self.clone() {
+            if !entities.contains(entity) {
+                return Err(entity);
+            }
+        }
+        Ok(EntityBatchCommands {
+            entity_batch: self.clone(),
+            commands,
+        })
+    }
+}
+
+impl EntityCommandsFetch for &'_ Vec<Entity> {
+    type Commands<'a> = EntityBatchCommands<'a>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        for entity in self.to_owned() {
+            if !entities.contains(entity) {
+                return Err(entity);
+            }
+        }
+        Ok(EntityBatchCommands {
+            entity_batch: self.to_owned(),
+            commands,
+        })
+    }
+}
+
+impl<const N: usize> EntityCommandsFetch for [Entity; N] {
+    type Commands<'a> = EntityBatchCommandsStatic<'a, N>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        for entity in self {
+            if !entities.contains(entity) {
+                return Err(entity);
+            }
+        }
+        Ok(EntityBatchCommandsStatic {
+            entity_batch: self,
+            commands,
+        })
+    }
+}
+
+impl<const N: usize> EntityCommandsFetch for &'_ [Entity; N] {
+    type Commands<'a> = EntityBatchCommandsStatic<'a, N>;
+
+    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+        for entity in self.to_owned() {
+            if !entities.contains(entity) {
+                return Err(entity);
+            }
+        }
+        Ok(EntityBatchCommandsStatic {
+            entity_batch: self.to_owned(),
+            commands,
+        })
+    }
+}
+
+pub trait EntityBatchCommand<Marker = ()>: Send + 'static {
+    fn apply(self, batch: Vec<Entity>, world: &mut World);
+
+    #[must_use = "commands do nothing unless applied to a `World`"]
+    fn with_batch(self, batch: Vec<Entity>) -> impl Command
+    where
+        Self: Sized,
+    {
+        move |world: &mut World| self.apply(batch, world)
+    }
+}
+
+pub trait EntityBatchCommandStatic<const N: usize, Marker = ()>: Send + 'static {
+    fn apply(self, batch: [Entity; N], world: &mut World);
+
+    #[must_use = "commands do nothing unless applied to a `World`"]
+    fn with_batch(self, batch: [Entity; N]) -> impl Command
+    where
+        Self: Sized,
+    {
+        move |world: &mut World| self.apply(batch, world)
+    }
+}
+
+pub struct EntityBatchCommands<'a> {
+    entity_batch: Vec<Entity>,
+    pub(crate) commands: Commands<'a, 'a>,
+}
+
+pub struct EntityBatchCommandsStatic<'a, const N: usize> {
+    entity_batch: [Entity; N],
+    pub(crate) commands: Commands<'a, 'a>,
+}
+
+impl<'a> EntityBatchCommands<'a> {
+    pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommand<M>) -> &mut Self {
+        self.commands.queue(command.with_batch(self.entity_batch.clone()));
+        self
+    }
+
+    pub fn batch(&self) -> Vec<Entity> {
+        self.entity_batch.clone()
+    }
+
+    #[track_caller]
+    pub fn insert<B>(&mut self, bundle: impl FnMut(Entity) -> B + Send + Sync + 'static) -> &mut Self 
+    where
+        B: Bundle
+    {
+        self.queue(batch_commands::insert(bundle, InsertMode::Replace))
+    }
+}
+
+impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
+    pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommandStatic<N, M>) -> &mut Self {
+        self.commands.queue(command.with_batch(self.entity_batch.clone()));
+        self
+    }
+
+    pub fn batch(&self) -> [Entity; N] {
+        self.entity_batch
+    }
+
+    pub fn dynamic(self) -> EntityBatchCommands<'a>{
+        EntityBatchCommands {
+            entity_batch: self.entity_batch.to_vec(),
+            commands: self.commands
+        }
+    }
+
+    #[track_caller]
+    pub fn insert(&mut self, bundles: [impl Bundle; N]) -> &mut Self {
+        self.queue(batch_commands::insert_static(bundles, InsertMode::Replace))
+    }
+}
+
 /// A wrapper around [`EntityCommands`] with convenience methods for working with a specified component type.
 pub struct EntityEntryCommands<'a, T> {
     entity_commands: EntityCommands<'a>,
@@ -1787,6 +1948,24 @@ where
 {
     fn apply(self, id: Entity, world: &mut World) {
         self(id, world);
+    }
+}
+
+impl<F> EntityBatchCommand for F
+where
+    F: FnOnce(Vec<Entity>, &mut World) + Send + 'static,
+{
+    fn apply(self, batch: Vec<Entity>, world: &mut World) {
+        self(batch, world);
+    }
+}
+
+impl<F, const N: usize> EntityBatchCommandStatic<N> for F
+where
+    F: FnOnce([Entity; N], &mut World) + Send + 'static,
+{
+    fn apply(self, batch: [Entity; N], world: &mut World) {
+        self(batch, world);
     }
 }
 
@@ -2130,6 +2309,52 @@ fn observe<E: Event, B: Bundle, M>(
     }
 }
 
+pub(super) mod batch_commands {
+    use super::*;
+
+    pub fn insert<B>(
+        mut bundle: impl FnMut(Entity) -> B + Send + Sync + 'static,
+        insert_mode: InsertMode,
+    ) -> impl EntityBatchCommand
+    where 
+        B: Bundle
+    {
+        move |batch: Vec<Entity>, world: &mut World| {
+            let mut bundles: Vec<(Entity, B)> = Vec::with_capacity(batch.len());
+            for entity in batch {
+                bundles.push((entity, bundle(entity)));
+            }
+
+            world.insert_batch_with_caller(
+                bundles,
+                insert_mode,
+                #[cfg(feature = "track_change_detection")]
+                caller,
+            );
+        }
+    }
+
+    pub fn insert_static<B, const N: usize>(
+        bundles: [B; N],
+        insert_mode: InsertMode,
+    ) -> impl EntityBatchCommandStatic<N>
+    where 
+        B: Bundle
+    {
+        #[cfg(feature = "track_change_detection")]
+        let caller = Location::caller();
+        move |batch: [Entity; N], world: &mut World| {
+            let paired_batch = core::iter::zip(batch, bundles);
+            world.insert_batch_with_caller(
+                paired_batch,
+                insert_mode,
+                #[cfg(feature = "track_change_detection")]
+                caller,
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::float_cmp, clippy::approx_constant)]
 mod tests {
@@ -2214,6 +2439,45 @@ mod tests {
         commands.entity(entity).entry::<W<String>>().or_from_world();
         queue.apply(&mut world);
         assert_eq!("*****", &world.get::<W<String>>(entity).unwrap().0);
+    }
+
+    #[test]
+    fn entity_batch_command_insert() {
+        #[derive(Component, PartialEq, Debug)]
+        struct X(i32);
+
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let a = Commands::new(&mut command_queue, &world).spawn_empty().id();
+        let b = Commands::new(&mut command_queue, &world).spawn_empty().id();
+
+        Commands::new(&mut command_queue, &world)
+            .entity(a)
+            .insert(X(0));
+        command_queue.apply(&mut world);
+        assert_eq!(Some(&X(0)), world.get::<X>(a));
+
+        Commands::new(&mut command_queue, &world)
+            .entity(vec![a, b])
+            .insert(|_| X(1));
+        command_queue.apply(&mut world);
+        assert_eq!(Some(&X(1)), world.get::<X>(a));
+        assert_eq!(Some(&X(1)), world.get::<X>(b));
+
+        Commands::new(&mut command_queue, &world)
+            .entity([a, b])
+            .insert([X(2), X(3)]);
+        command_queue.apply(&mut world);
+        assert_eq!(Some(&X(2)), world.get::<X>(a));
+        assert_eq!(Some(&X(3)), world.get::<X>(b));
+
+        Commands::new(&mut command_queue, &world)
+            .entity([a, b])
+            .dynamic()
+            .insert(|_| X(4));
+        command_queue.apply(&mut world);
+        assert_eq!(Some(&X(4)), world.get::<X>(a));
+        assert_eq!(Some(&X(4)), world.get::<X>(b));
     }
 
     #[test]

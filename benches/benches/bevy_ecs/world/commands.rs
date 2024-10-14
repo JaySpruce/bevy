@@ -127,6 +127,20 @@ pub fn insert_commands(criterion: &mut Criterion) {
             command_queue.apply(&mut world);
         });
     });
+    group.bench_function("batch_commands_insert", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn_empty().id());
+        }
+
+        bencher.iter(|| {
+            let mut commands = Commands::new(&mut command_queue, &world);
+            commands.entity(&entities).insert(|_| (Matrix::default(), Vec3::default()));
+            command_queue.apply(&mut world);
+        });
+    });
 
     group.finish();
 }
