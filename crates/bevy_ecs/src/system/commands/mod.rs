@@ -1651,24 +1651,39 @@ impl<'a> EntityCommands<'a> {
 pub trait EntityCommandsFetch {
     type Commands<'a>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity>;
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity>;
 }
 
 impl EntityCommandsFetch for Entity {
     type Commands<'a> = EntityCommands<'a>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         if !entities.contains(self) {
             return Err(self);
         }
-        Ok(EntityCommands { entity: self, commands })
+        Ok(EntityCommands {
+            entity: self,
+            commands,
+        })
     }
 }
 
 impl EntityCommandsFetch for &'_ [Entity] {
     type Commands<'a> = EntityBatchCommands<'a>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         for entity in self.to_owned() {
             if !entities.contains(entity) {
                 return Err(entity);
@@ -1684,7 +1699,11 @@ impl EntityCommandsFetch for &'_ [Entity] {
 impl EntityCommandsFetch for Vec<Entity> {
     type Commands<'a> = EntityBatchCommands<'a>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         for entity in self.clone() {
             if !entities.contains(entity) {
                 return Err(entity);
@@ -1700,7 +1719,11 @@ impl EntityCommandsFetch for Vec<Entity> {
 impl EntityCommandsFetch for &'_ Vec<Entity> {
     type Commands<'a> = EntityBatchCommands<'a>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         for entity in self.to_owned() {
             if !entities.contains(entity) {
                 return Err(entity);
@@ -1716,7 +1739,11 @@ impl EntityCommandsFetch for &'_ Vec<Entity> {
 impl<const N: usize> EntityCommandsFetch for [Entity; N] {
     type Commands<'a> = EntityBatchCommandsStatic<'a, N>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         for entity in self {
             if !entities.contains(entity) {
                 return Err(entity);
@@ -1732,7 +1759,11 @@ impl<const N: usize> EntityCommandsFetch for [Entity; N] {
 impl<const N: usize> EntityCommandsFetch for &'_ [Entity; N] {
     type Commands<'a> = EntityBatchCommandsStatic<'a, N>;
 
-    fn fetch_commands<'a>(self, entities: &Entities, commands: Commands<'a, 'a>) -> Result<Self::Commands<'a>, Entity> {
+    fn fetch_commands<'a>(
+        self,
+        entities: &Entities,
+        commands: Commands<'a, 'a>,
+    ) -> Result<Self::Commands<'a>, Entity> {
         for entity in self.to_owned() {
             if !entities.contains(entity) {
                 return Err(entity);
@@ -1781,7 +1812,8 @@ pub struct EntityBatchCommandsStatic<'a, const N: usize> {
 
 impl<'a> EntityBatchCommands<'a> {
     pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommand<M>) -> &mut Self {
-        self.commands.queue(command.with_batch(self.entity_batch.clone()));
+        self.commands
+            .queue(command.with_batch(self.entity_batch.clone()));
         self
     }
 
@@ -1790,9 +1822,12 @@ impl<'a> EntityBatchCommands<'a> {
     }
 
     #[track_caller]
-    pub fn insert<B>(&mut self, bundle: impl FnMut(Entity) -> B + Send + Sync + 'static) -> &mut Self 
+    pub fn insert<B>(
+        &mut self,
+        bundle: impl FnMut(Entity) -> B + Send + Sync + 'static,
+    ) -> &mut Self
     where
-        B: Bundle
+        B: Bundle,
     {
         self.queue(batch_commands::insert(bundle, InsertMode::Replace))
     }
@@ -1800,7 +1835,8 @@ impl<'a> EntityBatchCommands<'a> {
 
 impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
     pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommandStatic<N, M>) -> &mut Self {
-        self.commands.queue(command.with_batch(self.entity_batch.clone()));
+        self.commands
+            .queue(command.with_batch(self.entity_batch.clone()));
         self
     }
 
@@ -1808,10 +1844,10 @@ impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
         self.entity_batch
     }
 
-    pub fn dynamic(self) -> EntityBatchCommands<'a>{
+    pub fn dynamic(self) -> EntityBatchCommands<'a> {
         EntityBatchCommands {
             entity_batch: self.entity_batch.to_vec(),
-            commands: self.commands
+            commands: self.commands,
         }
     }
 
@@ -2316,9 +2352,11 @@ pub(super) mod batch_commands {
         mut bundle: impl FnMut(Entity) -> B + Send + Sync + 'static,
         insert_mode: InsertMode,
     ) -> impl EntityBatchCommand
-    where 
-        B: Bundle
+    where
+        B: Bundle,
     {
+        #[cfg(feature = "track_change_detection")]
+        let caller = Location::caller();
         move |batch: Vec<Entity>, world: &mut World| {
             let mut bundles: Vec<(Entity, B)> = Vec::with_capacity(batch.len());
             for entity in batch {
@@ -2338,8 +2376,8 @@ pub(super) mod batch_commands {
         bundles: [B; N],
         insert_mode: InsertMode,
     ) -> impl EntityBatchCommandStatic<N>
-    where 
-        B: Bundle
+    where
+        B: Bundle,
     {
         #[cfg(feature = "track_change_detection")]
         let caller = Location::caller();

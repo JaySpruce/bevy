@@ -1670,6 +1670,12 @@ impl World {
         QueryState::new(self)
     }
 
+    #[inline]
+    pub fn entities_filtered<F: QueryFilter>(&mut self) -> Vec<Entity> {
+        let mut query = self.query_filtered::<Entity, F>();
+        query.iter(&self).collect::<Vec<Entity>>()
+    }
+
     /// Returns an iterator of entities that had components of type `T` removed
     /// since the last call to [`World::clear_trackers`].
     pub fn removed<T: Component>(&self) -> impl Iterator<Item = Entity> + '_ {
