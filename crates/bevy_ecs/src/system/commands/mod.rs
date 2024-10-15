@@ -1648,6 +1648,109 @@ impl<'a> EntityCommands<'a> {
     }
 }
 
+/// A wrapper around [`EntityCommands`] with convenience methods for working with a specified component type.
+pub struct EntityEntryCommands<'a, T> {
+    entity_commands: EntityCommands<'a>,
+    marker: PhantomData<T>,
+}
+
+impl<'a, T: Component> EntityEntryCommands<'a, T> {
+    /// Modify the component `T` if it exists, using the the function `modify`.
+    pub fn and_modify(&mut self, modify: impl FnOnce(Mut<T>) + Send + Sync + 'static) -> &mut Self {
+        self.entity_commands
+            .queue(move |mut entity: EntityWorldMut| {
+                if let Some(value) = entity.get_mut() {
+                    modify(value);
+                }
+            });
+        self
+    }
+
+    /// [Insert](EntityCommands::insert) `default` into this entity, if `T` is not already present.
+    ///
+    /// See also [`or_insert_with`](Self::or_insert_with).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity does not exist.
+    /// See [`or_try_insert`](Self::or_try_insert) for a non-panicking version.
+    #[track_caller]
+    pub fn or_insert(&mut self, default: T) -> &mut Self {
+        self.entity_commands
+            .queue(insert(default, InsertMode::Keep));
+        self
+    }
+
+    /// [Insert](EntityCommands::insert) `default` into this entity, if `T` is not already present.
+    ///
+    /// Unlike [`or_insert`](Self::or_insert), this will not panic if the entity does not exist.
+    ///
+    /// See also [`or_insert_with`](Self::or_insert_with).
+    #[track_caller]
+    pub fn or_try_insert(&mut self, default: T) -> &mut Self {
+        self.entity_commands
+            .queue(try_insert(default, InsertMode::Keep));
+        self
+    }
+
+    /// [Insert](EntityCommands::insert) the value returned from `default` into this entity, if `T` is not already present.
+    ///
+    /// See also [`or_insert`](Self::or_insert) and [`or_try_insert`](Self::or_try_insert).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity does not exist.
+    /// See [`or_try_insert_with`](Self::or_try_insert_with) for a non-panicking version.
+    #[track_caller]
+    pub fn or_insert_with(&mut self, default: impl Fn() -> T) -> &mut Self {
+        self.or_insert(default())
+    }
+
+    /// [Insert](EntityCommands::insert) the value returned from `default` into this entity, if `T` is not already present.
+    ///
+    /// Unlike [`or_insert_with`](Self::or_insert_with), this will not panic if the entity does not exist.
+    ///
+    /// See also [`or_insert`](Self::or_insert) and [`or_try_insert`](Self::or_try_insert).
+    #[track_caller]
+    pub fn or_try_insert_with(&mut self, default: impl Fn() -> T) -> &mut Self {
+        self.or_try_insert(default())
+    }
+
+    /// [Insert](EntityCommands::insert) `T::default` into this entity, if `T` is not already present.
+    ///
+    /// See also [`or_insert`](Self::or_insert) and [`or_from_world`](Self::or_from_world).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity does not exist.
+    #[track_caller]
+    pub fn or_default(&mut self) -> &mut Self
+    where
+        T: Default,
+    {
+        #[allow(clippy::unwrap_or_default)]
+        // FIXME: use `expect` once stable
+        self.or_insert(T::default())
+    }
+
+    /// [Insert](EntityCommands::insert) `T::from_world` into this entity, if `T` is not already present.
+    ///
+    /// See also [`or_insert`](Self::or_insert) and [`or_default`](Self::or_default).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the entity does not exist.
+    #[track_caller]
+    pub fn or_from_world(&mut self) -> &mut Self
+    where
+        T: FromWorld,
+    {
+        self.entity_commands
+            .queue(insert_from_world::<T>(InsertMode::Keep));
+        self
+    }
+}
+
 pub trait EntityCommandsFetch {
     type Commands<'a>;
 
@@ -1875,109 +1978,6 @@ impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
     #[track_caller]
     pub fn insert_default<B: Bundle + Default>(&mut self) -> &mut Self {
         self.queue(batch::insert_same(|| B::default(), InsertMode::Replace))
-    }
-}
-
-/// A wrapper around [`EntityCommands`] with convenience methods for working with a specified component type.
-pub struct EntityEntryCommands<'a, T> {
-    entity_commands: EntityCommands<'a>,
-    marker: PhantomData<T>,
-}
-
-impl<'a, T: Component> EntityEntryCommands<'a, T> {
-    /// Modify the component `T` if it exists, using the the function `modify`.
-    pub fn and_modify(&mut self, modify: impl FnOnce(Mut<T>) + Send + Sync + 'static) -> &mut Self {
-        self.entity_commands
-            .queue(move |mut entity: EntityWorldMut| {
-                if let Some(value) = entity.get_mut() {
-                    modify(value);
-                }
-            });
-        self
-    }
-
-    /// [Insert](EntityCommands::insert) `default` into this entity, if `T` is not already present.
-    ///
-    /// See also [`or_insert_with`](Self::or_insert_with).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entity does not exist.
-    /// See [`or_try_insert`](Self::or_try_insert) for a non-panicking version.
-    #[track_caller]
-    pub fn or_insert(&mut self, default: T) -> &mut Self {
-        self.entity_commands
-            .queue(insert(default, InsertMode::Keep));
-        self
-    }
-
-    /// [Insert](EntityCommands::insert) `default` into this entity, if `T` is not already present.
-    ///
-    /// Unlike [`or_insert`](Self::or_insert), this will not panic if the entity does not exist.
-    ///
-    /// See also [`or_insert_with`](Self::or_insert_with).
-    #[track_caller]
-    pub fn or_try_insert(&mut self, default: T) -> &mut Self {
-        self.entity_commands
-            .queue(try_insert(default, InsertMode::Keep));
-        self
-    }
-
-    /// [Insert](EntityCommands::insert) the value returned from `default` into this entity, if `T` is not already present.
-    ///
-    /// See also [`or_insert`](Self::or_insert) and [`or_try_insert`](Self::or_try_insert).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entity does not exist.
-    /// See [`or_try_insert_with`](Self::or_try_insert_with) for a non-panicking version.
-    #[track_caller]
-    pub fn or_insert_with(&mut self, default: impl Fn() -> T) -> &mut Self {
-        self.or_insert(default())
-    }
-
-    /// [Insert](EntityCommands::insert) the value returned from `default` into this entity, if `T` is not already present.
-    ///
-    /// Unlike [`or_insert_with`](Self::or_insert_with), this will not panic if the entity does not exist.
-    ///
-    /// See also [`or_insert`](Self::or_insert) and [`or_try_insert`](Self::or_try_insert).
-    #[track_caller]
-    pub fn or_try_insert_with(&mut self, default: impl Fn() -> T) -> &mut Self {
-        self.or_try_insert(default())
-    }
-
-    /// [Insert](EntityCommands::insert) `T::default` into this entity, if `T` is not already present.
-    ///
-    /// See also [`or_insert`](Self::or_insert) and [`or_from_world`](Self::or_from_world).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entity does not exist.
-    #[track_caller]
-    pub fn or_default(&mut self) -> &mut Self
-    where
-        T: Default,
-    {
-        #[allow(clippy::unwrap_or_default)]
-        // FIXME: use `expect` once stable
-        self.or_insert(T::default())
-    }
-
-    /// [Insert](EntityCommands::insert) `T::from_world` into this entity, if `T` is not already present.
-    ///
-    /// See also [`or_insert`](Self::or_insert) and [`or_default`](Self::or_default).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the entity does not exist.
-    #[track_caller]
-    pub fn or_from_world(&mut self) -> &mut Self
-    where
-        T: FromWorld,
-    {
-        self.entity_commands
-            .queue(insert_from_world::<T>(InsertMode::Keep));
-        self
     }
 }
 
