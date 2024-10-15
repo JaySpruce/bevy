@@ -1677,7 +1677,7 @@ impl EntityCommandsFetch for Entity {
 }
 
 impl EntityCommandsFetch for &'_ [Entity] {
-    type Commands<'a> = EntityBatchCommands<'a>;
+    type Commands<'a> = EntityBatchCommands<'a, Vec<Entity>>;
 
     fn fetch_commands<'a>(
         self,
@@ -1697,7 +1697,7 @@ impl EntityCommandsFetch for &'_ [Entity] {
 }
 
 impl EntityCommandsFetch for Vec<Entity> {
-    type Commands<'a> = EntityBatchCommands<'a>;
+    type Commands<'a> = EntityBatchCommands<'a, Vec<Entity>>;
 
     fn fetch_commands<'a>(
         self,
@@ -1717,7 +1717,7 @@ impl EntityCommandsFetch for Vec<Entity> {
 }
 
 impl EntityCommandsFetch for &'_ Vec<Entity> {
-    type Commands<'a> = EntityBatchCommands<'a>;
+    type Commands<'a> = EntityBatchCommands<'a, Vec<Entity>>;
 
     fn fetch_commands<'a>(
         self,
@@ -1776,11 +1776,14 @@ impl<const N: usize> EntityCommandsFetch for &'_ [Entity; N] {
     }
 }
 
-pub trait EntityBatchCommand<Marker = ()>: Send + 'static {
-    fn apply(self, batch: Vec<Entity>, world: &mut World);
+pub trait EntityBatchCommand<E>: Send + 'static 
+where
+    E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static
+{
+    fn apply(self, batch: E, world: &mut World);
 
     #[must_use = "commands do nothing unless applied to a `World`"]
-    fn with_batch(self, batch: Vec<Entity>) -> impl Command
+    fn with_batch(self, batch: E) -> impl Command
     where
         Self: Sized,
     {
@@ -1788,21 +1791,49 @@ pub trait EntityBatchCommand<Marker = ()>: Send + 'static {
     }
 }
 
-pub trait EntityBatchCommandStatic<const N: usize, Marker = ()>: Send + 'static {
-    fn apply(self, batch: [Entity; N], world: &mut World);
-
-    #[must_use = "commands do nothing unless applied to a `World`"]
-    fn with_batch(self, batch: [Entity; N]) -> impl Command
-    where
-        Self: Sized,
-    {
-        move |world: &mut World| self.apply(batch, world)
-    }
-}
-
-pub struct EntityBatchCommands<'a> {
-    entity_batch: Vec<Entity>,
+pub struct EntityBatchCommands<'a, E> 
+where
+    E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static
+{
+    entity_batch: E,
     pub(crate) commands: Commands<'a, 'a>,
+}
+
+impl<'a, E> EntityBatchCommands<'a, E> 
+where
+    E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static
+{
+    pub fn queue(&mut self, command: impl EntityBatchCommand<E>) -> &mut Self {
+        self.commands
+            .queue(command.with_batch(self.entity_batch.clone()));
+        self
+    }
+
+    pub fn batch(&self) -> E {
+        self.entity_batch.clone()
+    }
+
+    #[track_caller]
+    pub fn insert<I>(&mut self, bundles: I) -> &mut Self
+    where
+        I: IntoIterator + Send + Sync + 'static,
+        I::Item: Bundle,
+    {
+        self.queue(batch::insert(bundles, InsertMode::Replace))
+    }
+
+    #[track_caller]
+    pub fn insert_same<B: Bundle>(
+        &mut self,
+        bundle: impl FnMut() -> B + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.queue(batch::insert_same(bundle, InsertMode::Replace))
+    }
+
+    #[track_caller]
+    pub fn insert_default<B: Bundle + Default>(&mut self) -> &mut Self {
+        self.queue(batch::insert_same(|| B::default(), InsertMode::Replace))
+    }
 }
 
 pub struct EntityBatchCommandsStatic<'a, const N: usize> {
@@ -1810,31 +1841,8 @@ pub struct EntityBatchCommandsStatic<'a, const N: usize> {
     pub(crate) commands: Commands<'a, 'a>,
 }
 
-impl<'a> EntityBatchCommands<'a> {
-    pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommand<M>) -> &mut Self {
-        self.commands
-            .queue(command.with_batch(self.entity_batch.clone()));
-        self
-    }
-
-    pub fn batch(&self) -> Vec<Entity> {
-        self.entity_batch.clone()
-    }
-
-    #[track_caller]
-    pub fn insert<B>(
-        &mut self,
-        bundle: impl FnMut(Entity) -> B + Send + Sync + 'static,
-    ) -> &mut Self
-    where
-        B: Bundle,
-    {
-        self.queue(batch_commands::insert(bundle, InsertMode::Replace))
-    }
-}
-
 impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
-    pub fn queue<M: 'static>(&mut self, command: impl EntityBatchCommandStatic<N, M>) -> &mut Self {
+    pub fn queue(&mut self, command: impl EntityBatchCommand<[Entity; N]>) -> &mut Self {
         self.commands
             .queue(command.with_batch(self.entity_batch.clone()));
         self
@@ -1844,16 +1852,29 @@ impl<'a, const N: usize> EntityBatchCommandsStatic<'a, N> {
         self.entity_batch
     }
 
-    pub fn dynamic(self) -> EntityBatchCommands<'a> {
+    pub fn dynamic(self) -> EntityBatchCommands<'a, [Entity; N]> {
         EntityBatchCommands {
-            entity_batch: self.entity_batch.to_vec(),
+            entity_batch: self.entity_batch,
             commands: self.commands,
         }
     }
 
     #[track_caller]
     pub fn insert(&mut self, bundles: [impl Bundle; N]) -> &mut Self {
-        self.queue(batch_commands::insert_static(bundles, InsertMode::Replace))
+        self.queue(batch::insert(bundles, InsertMode::Replace))
+    }
+
+    #[track_caller]
+    pub fn insert_same<B: Bundle>(
+        &mut self,
+        bundle: impl FnMut() -> B + Send + Sync + 'static,
+    ) -> &mut Self {
+        self.queue(batch::insert_same(bundle, InsertMode::Replace))
+    }
+
+    #[track_caller]
+    pub fn insert_default<B: Bundle + Default>(&mut self) -> &mut Self {
+        self.queue(batch::insert_same(|| B::default(), InsertMode::Replace))
     }
 }
 
@@ -1987,20 +2008,12 @@ where
     }
 }
 
-impl<F> EntityBatchCommand for F
+impl<F, E> EntityBatchCommand<E> for F
 where
-    F: FnOnce(Vec<Entity>, &mut World) + Send + 'static,
+    E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static,
+    F: FnOnce(E, &mut World) + Send + 'static,
 {
-    fn apply(self, batch: Vec<Entity>, world: &mut World) {
-        self(batch, world);
-    }
-}
-
-impl<F, const N: usize> EntityBatchCommandStatic<N> for F
-where
-    F: FnOnce([Entity; N], &mut World) + Send + 'static,
-{
-    fn apply(self, batch: [Entity; N], world: &mut World) {
+    fn apply(self, batch: E, world: &mut World) {
         self(batch, world);
     }
 }
@@ -2345,43 +2358,21 @@ fn observe<E: Event, B: Bundle, M>(
     }
 }
 
-pub(super) mod batch_commands {
+pub(super) mod batch {
     use super::*;
 
-    pub fn insert<B>(
-        mut bundle: impl FnMut(Entity) -> B + Send + Sync + 'static,
+    pub(super) fn insert<I, E>(
+        bundles: I,
         insert_mode: InsertMode,
-    ) -> impl EntityBatchCommand
+    ) -> impl EntityBatchCommand<E>
     where
-        B: Bundle,
+        E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static,
+        I: IntoIterator + Send + Sync + 'static,
+        I::Item: Bundle,
     {
         #[cfg(feature = "track_change_detection")]
         let caller = Location::caller();
-        move |batch: Vec<Entity>, world: &mut World| {
-            let mut bundles: Vec<(Entity, B)> = Vec::with_capacity(batch.len());
-            for entity in batch {
-                bundles.push((entity, bundle(entity)));
-            }
-
-            world.insert_batch_with_caller(
-                bundles,
-                insert_mode,
-                #[cfg(feature = "track_change_detection")]
-                caller,
-            );
-        }
-    }
-
-    pub fn insert_static<B, const N: usize>(
-        bundles: [B; N],
-        insert_mode: InsertMode,
-    ) -> impl EntityBatchCommandStatic<N>
-    where
-        B: Bundle,
-    {
-        #[cfg(feature = "track_change_detection")]
-        let caller = Location::caller();
-        move |batch: [Entity; N], world: &mut World| {
+        move |batch: E, world: &mut World| {
             let paired_batch = core::iter::zip(batch, bundles);
             world.insert_batch_with_caller(
                 paired_batch,
@@ -2389,6 +2380,45 @@ pub(super) mod batch_commands {
                 #[cfg(feature = "track_change_detection")]
                 caller,
             );
+        }
+    }
+
+    pub(super) fn insert_same<B: Bundle, E>(
+        bundle: impl FnMut() -> B + Send + Sync + 'static,
+        insert_mode: InsertMode,
+    ) -> impl EntityBatchCommand<E> 
+    where
+        E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static,
+    {
+        #[cfg(feature = "track_change_detection")]
+        let caller = Location::caller();
+        move |batch: E, world: &mut World| {
+            let paired_batch = core::iter::zip(
+                batch,
+                core::iter::repeat_with(bundle)
+            );
+            world.insert_batch_with_caller(
+                paired_batch,
+                insert_mode,
+                #[cfg(feature = "track_change_detection")]
+                caller,
+            );
+        }
+    }
+
+    pub(super) fn despawn<E>(log_warning: bool) -> impl EntityBatchCommand<E>
+    where
+        E: IntoIterator<Item = Entity> + Clone + Send + Sync + 'static,
+    {
+        let caller = Location::caller();
+        move |batch: E, world: &mut World| {
+            for entity in batch {
+                world.despawn_with_caller(
+                    entity,
+                    caller,
+                    log_warning,
+                );
+            }
         }
     }
 }
@@ -2481,7 +2511,7 @@ mod tests {
 
     #[test]
     fn entity_batch_command_insert() {
-        #[derive(Component, PartialEq, Debug)]
+        #[derive(Component, PartialEq, Debug, Default)]
         struct X(i32);
 
         let mut world = World::default();
@@ -2497,7 +2527,7 @@ mod tests {
 
         Commands::new(&mut command_queue, &world)
             .entity(vec![a, b])
-            .insert(|_| X(1));
+            .insert_same(|| X(1));
         command_queue.apply(&mut world);
         assert_eq!(Some(&X(1)), world.get::<X>(a));
         assert_eq!(Some(&X(1)), world.get::<X>(b));
@@ -2511,11 +2541,17 @@ mod tests {
 
         Commands::new(&mut command_queue, &world)
             .entity([a, b])
-            .dynamic()
-            .insert(|_| X(4));
+            .insert_same(|| X(4));
         command_queue.apply(&mut world);
         assert_eq!(Some(&X(4)), world.get::<X>(a));
         assert_eq!(Some(&X(4)), world.get::<X>(b));
+
+        Commands::new(&mut command_queue, &world)
+            .entity(vec![a, b])
+            .insert_default::<X>();
+        command_queue.apply(&mut world);
+        assert_eq!(Some(&X(0)), world.get::<X>(a));
+        assert_eq!(Some(&X(0)), world.get::<X>(b));
     }
 
     #[test]

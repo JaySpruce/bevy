@@ -137,7 +137,9 @@ pub fn insert_commands(criterion: &mut Criterion) {
 
         bencher.iter(|| {
             let mut commands = Commands::new(&mut command_queue, &world);
-            commands.entity(&entities).insert(|_| (Matrix::default(), Vec3::default()));
+            commands
+                .entity(&entities)
+                .insert_default::<(Matrix, Vec3)>();
             command_queue.apply(&mut world);
         });
     });
