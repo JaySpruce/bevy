@@ -87,7 +87,34 @@ pub fn insert_commands(criterion: &mut Criterion) {
             for entity in &entities {
                 commands
                     .entity(*entity)
-                    .insert((Matrix::default(), Vec3::default()));
+                    .insert(Matrix::default())
+                    .insert(Vec3::default())
+                    .insert(A)
+                    .insert(B)
+                    .insert(C);
+            }
+            command_queue.apply(&mut world);
+        });
+    });
+    group.bench_function("insert_batched", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn_empty().id());
+        }
+
+        bencher.iter(|| {
+            let mut commands = Commands::new(&mut command_queue, &world);
+            for entity in &entities {
+                commands
+                    .entity(*entity)
+                    .batch()
+                    .insert(Matrix::default())
+                    .insert(Vec3::default())
+                    .insert(A)
+                    .insert(B)
+                    .insert(C);
             }
             command_queue.apply(&mut world);
         });

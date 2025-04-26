@@ -37,7 +37,7 @@ pub struct Spawn<B: Bundle>(pub B);
 
 /// A spawn-able list of changes to a given [`World`] and relative to a given [`Entity`]. This is generally used
 /// for spawning "related" entities, such as children.
-pub trait SpawnableList<R> {
+pub trait SpawnableList<R>: Send {
     /// Spawn this list of changes in a given [`World`] and relative to a given [`Entity`]. This is generally used
     /// for spawning "related" entities, such as children.
     fn spawn(self, world: &mut World, entity: Entity);
@@ -200,6 +200,13 @@ unsafe impl<R: Relationship, L: SpawnableList<R> + Send + Sync + 'static> Bundle
         <R::RelationshipTarget as Bundle>::get_component_ids(components, ids);
     }
 
+    fn queue_register_components(
+        components: &crate::component::ComponentsQueuedRegistrator,
+        ids_and_validity: &mut impl FnMut(crate::component::ComponentId, bool),
+    ) {
+        <R::RelationshipTarget as Bundle>::queue_register_components(components, ids_and_validity);
+    }
+
     fn register_required_components(
         components: &mut crate::component::ComponentsRegistrator,
         required_components: &mut crate::component::RequiredComponents,
@@ -219,6 +226,14 @@ impl<R: Relationship, L: SpawnableList<R>> DynamicBundle for SpawnRelatedBundle<
     ) -> Self::Effect {
         <R::RelationshipTarget as RelationshipTarget>::with_capacity(self.list.size_hint())
             .get_components(func);
+        self
+    }
+    fn get_components_with_size(
+        self,
+        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::OwningPtr<'_>, usize),
+    ) -> Self::Effect {
+        <R::RelationshipTarget as RelationshipTarget>::with_capacity(self.list.size_hint())
+            .get_components_with_size(func);
         self
     }
 }
@@ -249,6 +264,14 @@ impl<R: Relationship, B: Bundle> DynamicBundle for SpawnOneRelated<R, B> {
         <R::RelationshipTarget as RelationshipTarget>::with_capacity(1).get_components(func);
         self
     }
+    fn get_components_with_size(
+        self,
+        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::OwningPtr<'_>, usize),
+    ) -> Self::Effect {
+        <R::RelationshipTarget as RelationshipTarget>::with_capacity(1)
+            .get_components_with_size(func);
+        self
+    }
 }
 
 // SAFETY: This internally relies on the RelationshipTarget's Bundle implementation, which is sound.
@@ -265,6 +288,13 @@ unsafe impl<R: Relationship, B: Bundle> Bundle for SpawnOneRelated<R, B> {
         ids: &mut impl FnMut(Option<crate::component::ComponentId>),
     ) {
         <R::RelationshipTarget as Bundle>::get_component_ids(components, ids);
+    }
+
+    fn queue_register_components(
+        components: &crate::component::ComponentsQueuedRegistrator,
+        ids_and_validity: &mut impl FnMut(crate::component::ComponentId, bool),
+    ) {
+        <R::RelationshipTarget as Bundle>::queue_register_components(components, ids_and_validity);
     }
 
     fn register_required_components(

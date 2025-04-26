@@ -77,7 +77,9 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let mut field_component_ids = Vec::new();
     let mut field_get_component_ids = Vec::new();
+    let mut field_queue_register_components = Vec::new();
     let mut field_get_components = Vec::new();
+    let mut field_get_components_with_size = Vec::new();
     let mut field_from_components = Vec::new();
     let mut field_required_components = Vec::new();
     for (((i, field_type), field_kind), field) in field_type
@@ -97,10 +99,16 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 field_get_component_ids.push(quote! {
                     <#field_type as #ecs_path::bundle::Bundle>::get_component_ids(components, &mut *ids);
                 });
+                field_queue_register_components.push(quote! {
+                    <#field_type as #ecs_path::bundle::Bundle>::queue_register_components(components, &mut *ids_and_validity);
+                });
                 match field {
                     Some(field) => {
                         field_get_components.push(quote! {
                             self.#field.get_components(&mut *func);
+                        });
+                        field_get_components_with_size.push(quote! {
+                            self.#field.get_components_with_size(&mut *func);
                         });
                         field_from_components.push(quote! {
                             #field: <#field_type as #ecs_path::bundle::BundleFromComponents>::from_components(ctx, &mut *func),
@@ -110,6 +118,9 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                         let index = Index::from(i);
                         field_get_components.push(quote! {
                             self.#index.get_components(&mut *func);
+                        });
+                        field_get_components_with_size.push(quote! {
+                            self.#index.get_components_with_size(&mut *func);
                         });
                         field_from_components.push(quote! {
                             #index: <#field_type as #ecs_path::bundle::BundleFromComponents>::from_components(ctx, &mut *func),
@@ -150,6 +161,13 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 #(#field_get_component_ids)*
             }
 
+            fn queue_register_components(
+                components: &#ecs_path::component::ComponentsQueuedRegistrator,
+                ids_and_validity: &mut impl FnMut(#ecs_path::component::ComponentId, bool)
+            ){
+                #(#field_queue_register_components)*
+            }
+
             fn register_required_components(
                 components: &mut #ecs_path::component::ComponentsRegistrator,
                 required_components: &mut #ecs_path::component::RequiredComponents
@@ -183,6 +201,15 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::OwningPtr<'_>)
             ) {
                 #(#field_get_components)*
+            }
+
+            #[allow(unused_variables)]
+            #[inline]
+            fn get_components_with_size(
+                self,
+                func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::OwningPtr<'_>, usize)
+            ) {
+                #(#field_get_components_with_size)*
             }
         }
     })

@@ -11,8 +11,8 @@ use crate::{
     },
     change_detection::MaybeLocation,
     component::{
-        Component, ComponentId, Components, ComponentsRegistrator, RequiredComponentConstructor,
-        RequiredComponents, StorageType, Tick,
+        Component, ComponentId, Components, ComponentsQueuedRegistrator, ComponentsRegistrator,
+        RequiredComponentConstructor, RequiredComponents, StorageType, Tick,
     },
     entity::{Entities, Entity, EntityLocation},
     observer::Observers,
@@ -156,6 +156,11 @@ pub unsafe trait Bundle: DynamicBundle + Send + Sync + 'static {
     /// Gets this [`Bundle`]'s component ids. This will be [`None`] if the component has not been registered.
     fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>));
 
+    fn queue_register_components(
+        components: &ComponentsQueuedRegistrator,
+        ids_and_validity: &mut impl FnMut(ComponentId, bool),
+    );
+
     /// Registers components that are required by the components in this [`Bundle`].
     fn register_required_components(
         _components: &mut ComponentsRegistrator,
@@ -204,6 +209,11 @@ pub trait DynamicBundle {
     /// ownership of the component values to `func`.
     #[doc(hidden)]
     fn get_components(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>)) -> Self::Effect;
+
+    fn get_components_with_size(
+        self,
+        func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize),
+    ) -> Self::Effect;
 }
 
 /// An operation on an [`Entity`] that occurs _after_ inserting the [`Bundle`] that defined this bundle effect.
@@ -214,7 +224,7 @@ pub trait DynamicBundle {
 /// 3. The [`BundleEffect`] is run.
 ///
 /// See [`DynamicBundle::Effect`].
-pub trait BundleEffect {
+pub trait BundleEffect: Send {
     /// Applies this effect to the given `entity`.
     fn apply(self, entity: &mut EntityWorldMut);
 }
@@ -244,6 +254,18 @@ unsafe impl<C: Component> Bundle for C {
     fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>)) {
         ids(components.get_id(TypeId::of::<C>()));
     }
+
+    fn queue_register_components(
+        components: &ComponentsQueuedRegistrator,
+        ids_and_validity: &mut impl FnMut(ComponentId, bool),
+    ) {
+        if let Some(id) = components.get_id(TypeId::of::<C>()) {
+            ids_and_validity(id, components.is_id_valid(id));
+        } else {
+            let id = components.queue_register_component::<C>();
+            ids_and_validity(id, false);
+        }
+    }
 }
 
 // SAFETY:
@@ -266,6 +288,14 @@ impl<C: Component> DynamicBundle for C {
     #[inline]
     fn get_components(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>)) -> Self::Effect {
         OwningPtr::make(self, |ptr| func(C::STORAGE_TYPE, ptr));
+    }
+
+    #[inline]
+    fn get_components_with_size(
+        self,
+        func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize),
+    ) -> Self::Effect {
+        OwningPtr::make(self, |ptr| func(C::STORAGE_TYPE, ptr, size_of::<C>()));
     }
 }
 
@@ -294,6 +324,10 @@ macro_rules! tuple_impl {
 
             fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>)){
                 $(<$name as Bundle>::get_component_ids(components, ids);)*
+            }
+
+            fn queue_register_components(components: &ComponentsQueuedRegistrator,  ids_and_validity: &mut impl FnMut(ComponentId, bool)){
+                $(<$name as Bundle>::queue_register_components(components, ids_and_validity);)*
             }
 
             fn register_required_components(
@@ -364,6 +398,22 @@ macro_rules! tuple_impl {
                 let ($(mut $name,)*) = self;
                 ($(
                     $name.get_components(&mut *func),
+                )*)
+            }
+
+            #[allow(
+                clippy::unused_unit,
+                reason = "Zero-length tuples will generate a function body equivalent to `()`; however, this macro is meant for all applicable tuples, and as such it makes no sense to rewrite it just for that case."
+            )]
+            #[inline(always)]
+            fn get_components_with_size(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize)) -> Self::Effect {
+                #[allow(
+                    non_snake_case,
+                    reason = "The names of these variables are provided by the caller, not by us."
+                )]
+                let ($(mut $name,)*) = self;
+                ($(
+                    $name.get_components_with_size(&mut *func),
                 )*)
             }
         }

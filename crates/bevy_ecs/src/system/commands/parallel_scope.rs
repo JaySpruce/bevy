@@ -1,12 +1,11 @@
 use bevy_utils::Parallel;
 
 use crate::{
+    component::ComponentsQueuedRegistrator,
     entity::Entities,
-    prelude::World,
-    system::{Deferred, SystemBuffer, SystemMeta, SystemParam},
+    system::{Commands, Deferred, SystemBuffer, SystemMeta, SystemParam},
+    world::{CommandQueue, World},
 };
-
-use super::{CommandQueue, Commands};
 
 #[derive(Default)]
 struct ParallelCommandQueue {
@@ -52,6 +51,7 @@ struct ParallelCommandQueue {
 pub struct ParallelCommands<'w, 's> {
     state: Deferred<'s, ParallelCommandQueue>,
     entities: &'w Entities,
+    components_queue: ComponentsQueuedRegistrator<'w>,
 }
 
 impl SystemBuffer for ParallelCommandQueue {
@@ -71,7 +71,11 @@ impl<'w, 's> ParallelCommands<'w, 's> {
     /// For an example, see the type-level documentation for [`ParallelCommands`].
     pub fn command_scope<R>(&self, f: impl FnOnce(Commands) -> R) -> R {
         self.state.thread_queues.scope(|queue| {
-            let commands = Commands::new_from_entities(queue, self.entities);
+            let commands = Commands::new_from_entities_and_registrator(
+                queue,
+                self.entities,
+                self.components_queue,
+            );
             f(commands)
         })
     }

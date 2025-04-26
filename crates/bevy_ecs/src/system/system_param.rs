@@ -3,7 +3,7 @@ use crate::{
     archetype::{Archetype, Archetypes},
     bundle::Bundles,
     change_detection::{MaybeLocation, Ticks, TicksMut},
-    component::{ComponentId, ComponentTicks, Components, Tick},
+    component::{ComponentId, ComponentTicks, Components, ComponentsQueuedRegistrator, Tick},
     entity::Entities,
     query::{
         Access, FilteredAccess, FilteredAccessSet, QueryData, QueryFilter, QuerySingleError,
@@ -1818,6 +1818,27 @@ unsafe impl<'a> SystemParam for &'a Components {
         _change_tick: Tick,
     ) -> Self::Item<'w, 's> {
         world.components()
+    }
+}
+
+// SAFETY: Only reads World components and component ids
+unsafe impl<'a> ReadOnlySystemParam for ComponentsQueuedRegistrator<'_> {}
+
+// SAFETY: no component value access
+unsafe impl<'a> SystemParam for ComponentsQueuedRegistrator<'_> {
+    type State = ();
+    type Item<'w, 's> = ComponentsQueuedRegistrator<'w>;
+
+    fn init_state(_world: &mut World, _system_meta: &mut SystemMeta) -> Self::State {}
+
+    #[inline]
+    unsafe fn get_param<'w, 's>(
+        _state: &'s mut Self::State,
+        _system_meta: &SystemMeta,
+        world: UnsafeWorldCell<'w>,
+        _change_tick: Tick,
+    ) -> Self::Item<'w, 's> {
+        unsafe { world.world().components_queue() }
     }
 }
 

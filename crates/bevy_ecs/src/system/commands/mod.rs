@@ -10,19 +10,23 @@ pub use entity_command::EntityCommand;
 #[cfg(feature = "std")]
 pub use parallel_scope::*;
 
-use alloc::boxed::Box;
-use core::marker::PhantomData;
+use alloc::{boxed::Box, vec::Vec};
+use bevy_platform::hash::FixedHasher;
+use bevy_ptr::{Aligned, OwningPtr};
+use core::{any::TypeId, marker::PhantomData, mem::ManuallyDrop, ptr::NonNull};
+use indexmap::{IndexMap, IndexSet};
 use log::error;
 
 use crate::{
     self as bevy_ecs,
-    bundle::{Bundle, InsertMode, NoBundleEffect},
+    bundle::{Bundle, BundleEffect, InsertMode, NoBundleEffect},
     change_detection::{MaybeLocation, Mut},
-    component::{Component, ComponentId, Mutable},
-    entity::{Entities, Entity, EntityClonerBuilder, EntityDoesNotExistError},
+    component::{Component, ComponentId, ComponentsQueuedRegistrator, Mutable, StorageType},
+    entity::{Entities, Entity, EntityClonerBuilder, EntityDoesNotExistError, EntityLocation},
     error::{ignore, warn, BevyError, CommandWithEntity, ErrorContext, HandleError},
     event::Event,
     observer::{Observer, TriggerTargets},
+    relationship::RelationshipHookMode,
     resource::Resource,
     schedule::ScheduleLabel,
     system::{
@@ -31,7 +35,7 @@ use crate::{
     },
     world::{
         command_queue::RawCommandQueue, unsafe_world_cell::UnsafeWorldCell, CommandQueue,
-        EntityWorldMut, FromWorld, World,
+        EntityWorldMut, FromWorld, World, ON_ADD, ON_INSERT, ON_REMOVE, ON_REPLACE,
     },
 };
 
@@ -101,6 +105,7 @@ use crate::{
 pub struct Commands<'w, 's> {
     queue: InternalQueue<'s>,
     entities: &'w Entities,
+    pub(crate) components_queue: ComponentsQueuedRegistrator<'w>,
 }
 
 // SAFETY: All commands [`Command`] implement [`Send`]
@@ -110,12 +115,16 @@ unsafe impl Send for Commands<'_, '_> {}
 unsafe impl Sync for Commands<'_, '_> {}
 
 const _: () = {
-    type __StructFieldsAlias<'w, 's> = (Deferred<'s, CommandQueue>, &'w Entities);
+    type __StructFieldsAlias<'w, 's> = (
+        Deferred<'s, CommandQueue>,
+        &'w Entities,
+        ComponentsQueuedRegistrator<'w>,
+    );
     #[doc(hidden)]
     pub struct FetchState {
         state: <__StructFieldsAlias<'static, 'static> as bevy_ecs::system::SystemParam>::State,
     }
-    // SAFETY: Only reads Entities
+    // SAFETY: Only reads Entities and ComponentsQueuedRegistrator
     unsafe impl bevy_ecs::system::SystemParam for Commands<'_, '_> {
         type State = FetchState;
 
@@ -178,10 +187,12 @@ const _: () = {
             system_meta: &bevy_ecs::system::SystemMeta,
             world: UnsafeWorldCell,
         ) -> Result<(), SystemParamValidationError> {
-            <(Deferred<CommandQueue>, &Entities) as bevy_ecs::system::SystemParam>::validate_param(
-                &state.state,
-                system_meta,
-                world,
+            <(
+                Deferred<CommandQueue>,
+                &Entities,
+                ComponentsQueuedRegistrator,
+            ) as bevy_ecs::system::SystemParam>::validate_param(
+                &state.state, system_meta, world
             )
         }
 
@@ -192,18 +203,29 @@ const _: () = {
             world: UnsafeWorldCell<'w>,
             change_tick: bevy_ecs::component::Tick,
         ) -> Self::Item<'w, 's> {
-            let(f0, f1) =  <(Deferred<'s, CommandQueue>, &'w Entities) as bevy_ecs::system::SystemParam>::get_param(&mut state.state, system_meta, world, change_tick);
+            let (f0, f1, f2) = <(
+                Deferred<'s, CommandQueue>,
+                &'w Entities,
+                ComponentsQueuedRegistrator<'w>,
+            ) as bevy_ecs::system::SystemParam>::get_param(
+                &mut state.state,
+                system_meta,
+                world,
+                change_tick,
+            );
             Commands {
                 queue: InternalQueue::CommandQueue(f0),
                 entities: f1,
+                components_queue: f2,
             }
         }
     }
-    // SAFETY: Only reads Entities
+    // SAFETY: Only reads Entities and ComponentsQueuedRegistrator
     unsafe impl<'w, 's> bevy_ecs::system::ReadOnlySystemParam for Commands<'w, 's>
     where
         Deferred<'s, CommandQueue>: bevy_ecs::system::ReadOnlySystemParam,
         &'w Entities: bevy_ecs::system::ReadOnlySystemParam,
+        ComponentsQueuedRegistrator<'w>: bevy_ecs::system::ReadOnlySystemParam,
     {
     }
 };
@@ -216,14 +238,24 @@ enum InternalQueue<'s> {
 impl<'w, 's> Commands<'w, 's> {
     /// Returns a new `Commands` instance from a [`CommandQueue`] and a [`World`].
     pub fn new(queue: &'s mut CommandQueue, world: &'w World) -> Self {
-        Self::new_from_entities(queue, &world.entities)
+        Self {
+            queue: InternalQueue::CommandQueue(Deferred(queue)),
+            entities: world.entities(),
+            components_queue: world.components_queue(),
+        }
     }
 
-    /// Returns a new `Commands` instance from a [`CommandQueue`] and an [`Entities`] reference.
-    pub fn new_from_entities(queue: &'s mut CommandQueue, entities: &'w Entities) -> Self {
+    /// Returns a new `Commands` instance from a [`CommandQueue`], an [`Entities`] reference,
+    /// and a [`ComponentsQueuedRegistrator`].
+    pub fn new_from_entities_and_registrator(
+        queue: &'s mut CommandQueue,
+        entities: &'w Entities,
+        components_queue: ComponentsQueuedRegistrator<'w>,
+    ) -> Self {
         Self {
             queue: InternalQueue::CommandQueue(Deferred(queue)),
             entities,
+            components_queue,
         }
     }
 
@@ -234,13 +266,11 @@ impl<'w, 's> Commands<'w, 's> {
     /// # Safety
     ///
     /// * Caller ensures that `queue` must outlive `'w`
-    pub(crate) unsafe fn new_raw_from_entities(
-        queue: RawCommandQueue,
-        entities: &'w Entities,
-    ) -> Self {
+    pub(crate) unsafe fn new_raw(queue: RawCommandQueue, world: &'w World) -> Self {
         Self {
             queue: InternalQueue::RawCommandQueue(queue),
-            entities,
+            entities: world.entities(),
+            components_queue: world.components_queue(),
         }
     }
 
@@ -272,6 +302,7 @@ impl<'w, 's> Commands<'w, 's> {
                 }
             },
             entities: self.entities,
+            components_queue: self.components_queue,
         }
     }
 
@@ -1297,6 +1328,25 @@ impl<'a> EntityCommands<'a> {
         }
     }
 
+    pub fn batch(&mut self) -> EntityCommandsBatcher {
+        EntityCommandsBatcher {
+            entity_commands: self.reborrow(),
+            buffer: Box::new(EntityCommandBuffer::default()),
+            error_handler: crate::error::default_error_handler(),
+        }
+    }
+
+    pub fn batch_handled(
+        &mut self,
+        error_handler: fn(BevyError, ErrorContext),
+    ) -> EntityCommandsBatcher {
+        EntityCommandsBatcher {
+            entity_commands: self.reborrow(),
+            buffer: Box::new(EntityCommandBuffer::default()),
+            error_handler,
+        }
+    }
+
     /// Adds a [`Bundle`] of components to the entity.
     ///
     /// This will overwrite any previous value(s) of the same component type.
@@ -2067,6 +2117,827 @@ impl<'a> EntityCommands<'a> {
     /// The command will panic when applied if the target entity does not exist.
     pub fn move_components<B: Bundle>(&mut self, target: Entity) -> &mut Self {
         self.queue(entity_command::move_components::<B>(target))
+    }
+}
+
+/// # Technical notes
+///
+/// - If you insert the same component multiple times, only the last instance will be inserted,
+///   and it will be treated as if it were the only insertion of that component (if the entity
+///   didn't have the component, `on_add` hooks and `OnAdd` observers will be triggered).
+/// - If you insert and then remove the same component, nothing will happen.
+/// - If you remove and then insert the same component, all relevant hooks and observers
+///   (replace, remove, add, and insert, in that order) will be triggered.
+pub struct EntityCommandsBatcher<'a> {
+    entity_commands: EntityCommands<'a>,
+    buffer: Box<EntityCommandBuffer>,
+    error_handler: fn(BevyError, ErrorContext),
+}
+
+impl<'a> Drop for EntityCommandsBatcher<'a> {
+    fn drop(&mut self) {
+        //std::println!("EntityCommandsBatcher drop");
+        if !self.buffer.commands.is_empty() {
+            let buffer = core::mem::take(&mut *self.buffer);
+            self.entity_commands
+                .queue_handled(batch_command(buffer), self.error_handler);
+        }
+    }
+}
+
+impl<'a> EntityCommandsBatcher<'a> {
+    #[track_caller]
+    pub fn insert(&mut self, bundle: impl Bundle) -> &mut Self {
+        self.insert_bundle_internal(bundle, InsertMode::Replace, RelationshipHookMode::Run)
+    }
+
+    #[track_caller]
+    pub fn insert_if<F>(&mut self, bundle: impl Bundle, condition: F) -> &mut Self
+    where
+        F: FnOnce() -> bool,
+    {
+        if condition() {
+            self.insert(bundle)
+        } else {
+            self
+        }
+    }
+
+    #[track_caller]
+    pub fn insert_if_new(&mut self, bundle: impl Bundle) -> &mut Self {
+        self.insert_bundle_internal(bundle, InsertMode::Keep, RelationshipHookMode::Run)
+    }
+
+    #[track_caller]
+    pub fn insert_if_new_and<F>(&mut self, bundle: impl Bundle, condition: F) -> &mut Self
+    where
+        F: FnOnce() -> bool,
+    {
+        if condition() {
+            self.insert_if_new(bundle)
+        } else {
+            self
+        }
+    }
+
+    #[track_caller]
+    pub unsafe fn insert_by_id<T: Send + 'static>(
+        &mut self,
+        component_id: ComponentId,
+        value: T,
+    ) -> &mut Self {
+        self.insert_component_internal(
+            component_id,
+            value,
+            InsertMode::Replace,
+            RelationshipHookMode::Run,
+        )
+    }
+
+    #[track_caller]
+    pub fn remove<B: Bundle>(&mut self) -> &mut Self {
+        self
+    }
+
+    #[track_caller]
+    pub fn remove_with_requires<B: Bundle>(&mut self) -> &mut Self {
+        self
+    }
+
+    #[track_caller]
+    pub fn remove_by_id(&mut self, component_id: ComponentId) -> &mut Self {
+        self
+    }
+
+    #[track_caller]
+    pub fn retain<B: Bundle>(&mut self) -> &mut Self {
+        self
+    }
+
+    #[track_caller]
+    pub fn clear(&mut self) -> &mut Self {
+        self
+    }
+
+    #[track_caller]
+    pub fn despawn(&mut self) {
+        self.buffer.add_despawn();
+    }
+
+    #[track_caller]
+    pub fn finish(&mut self) -> EntityCommands {
+        self.entity_commands.reborrow()
+    }
+
+    #[track_caller]
+    pub(crate) fn insert_bundle_internal<B: Bundle>(
+        &mut self,
+        bundle: B,
+        mode: InsertMode,
+        relationship_hook_mode: RelationshipHookMode,
+    ) -> &mut Self {
+        let mut component_ids = Vec::new();
+        B::queue_register_components(
+            &self.entity_commands.commands.components_queue,
+            &mut |id, is_valid| {
+                if !is_valid {
+                    self.buffer.needs_component_registration = true;
+                }
+                component_ids.push(id);
+            },
+        );
+
+        let mut component_ptrs = Vec::new();
+        let effect = B::get_components_with_size(bundle, &mut |_, ptr, size| {
+            let dst = Box::into_raw(Box::<[u8]>::new_uninit_slice(size)).cast();
+            let ptr = ManuallyDrop::new(ptr);
+            unsafe {
+                core::ptr::copy::<u8>(ptr.as_ptr(), dst, size);
+            }
+            component_ptrs.push(TempComponentPtr(dst));
+        });
+
+        self.buffer.add_insert_bundle(
+            component_ids.into(),
+            component_ptrs.into(),
+            effect,
+            mode,
+            relationship_hook_mode,
+        );
+        self
+    }
+
+    #[track_caller]
+    pub(crate) fn insert_component_internal<T: Send + 'static>(
+        &mut self,
+        component_id: ComponentId,
+        value: T,
+        insert_mode: InsertMode,
+        relationship_hook_mode: RelationshipHookMode,
+    ) -> &mut Self {
+        let component_ptr =
+            TempComponentPtr(Box::into_raw(Box::new(ManuallyDrop::new(value))).cast());
+        self.buffer.add_insert_component(
+            component_id,
+            component_ptr,
+            insert_mode,
+            relationship_hook_mode,
+        );
+        self
+    }
+}
+
+#[derive(Clone, Copy)]
+struct TempComponentPtr(*mut u8);
+
+unsafe impl Send for TempComponentPtr {}
+
+impl TempComponentPtr {
+    fn into_owning(self) -> OwningPtr<'static> {
+        unsafe { OwningPtr::<Aligned>::new(NonNull::new_unchecked(self.0)) }
+    }
+}
+
+struct StoredBundle {
+    component_ids: Box<[ComponentId]>,
+    component_ptrs: Box<[TempComponentPtr]>,
+    effect: Option<Box<dyn FnOnce(&mut EntityWorldMut) + Send + 'static>>,
+}
+
+struct StoredComponent {
+    component_id: ComponentId,
+    component_ptr: TempComponentPtr,
+}
+
+struct StoredInsert {
+    component_ptr: TempComponentPtr,
+    is_replacing: bool,
+    relationship_hook_mode: RelationshipHookMode,
+}
+
+enum StorageIndex {
+    Bundle(u32),
+    Component(u32),
+}
+
+enum EntityCommandKind {
+    Insert {
+        storage_index: StorageIndex,
+        insert_mode: InsertMode,
+        relationship_hook_mode: RelationshipHookMode,
+    },
+    Remove {
+        components: Box<[ComponentId]>,
+        with_requires: bool,
+    },
+    Retain {
+        components: Box<[ComponentId]>,
+    },
+    Clear,
+    Despawn,
+}
+
+#[derive(Default)]
+pub(crate) struct EntityCommandBuffer {
+    pub(crate) needs_component_registration: bool,
+    pub(crate) despawned: bool,
+    stored_bundles: Vec<StoredBundle>,
+    stored_components: Vec<StoredComponent>,
+    commands: Vec<EntityCommandKind>,
+}
+
+impl EntityCommandBuffer {
+    fn add_insert_bundle<E: BundleEffect + Send + 'static>(
+        &mut self,
+        component_ids: Box<[ComponentId]>,
+        component_ptrs: Box<[TempComponentPtr]>,
+        effect: E,
+        insert_mode: InsertMode,
+        relationship_hook_mode: RelationshipHookMode,
+    ) {
+        if self.despawned {
+            return;
+        }
+        let storage_index = self.stored_bundles.len() as u32;
+        self.stored_bundles.push(StoredBundle {
+            component_ids,
+            component_ptrs,
+            effect: if TypeId::of::<E>() != TypeId::of::<()>() {
+                Some(Box::new(move |entity| effect.apply(entity)))
+            } else {
+                None
+            },
+        });
+        self.commands.push(EntityCommandKind::Insert {
+            storage_index: StorageIndex::Bundle(storage_index),
+            insert_mode,
+            relationship_hook_mode,
+        });
+    }
+
+    fn add_insert_component(
+        &mut self,
+        component_id: ComponentId,
+        component_ptr: TempComponentPtr,
+        insert_mode: InsertMode,
+        relationship_hook_mode: RelationshipHookMode,
+    ) {
+        if self.despawned {
+            return;
+        }
+        let storage_index = self.stored_components.len() as u32;
+        self.stored_components.push(StoredComponent {
+            component_id,
+            component_ptr,
+        });
+        self.commands.push(EntityCommandKind::Insert {
+            storage_index: StorageIndex::Component(storage_index),
+            insert_mode,
+            relationship_hook_mode,
+        });
+    }
+
+    fn add_despawn(&mut self) {
+        if !self.commands.is_empty() {
+            self.commands.push(EntityCommandKind::Despawn);
+        }
+        self.despawned = true;
+    }
+}
+
+fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
+    move |entity: EntityWorldMut| {
+        //std::println!("batch command");
+        let entity_id = entity.id();
+        let initial_location = entity.location();
+        let world = entity.into_world_mut();
+        let change_tick = world.change_tick();
+
+        if buffer.needs_component_registration {
+            world.components_registrator().apply_queued_registrations();
+        }
+
+        let mut new_archetype_id = initial_location.archetype_id;
+        // IDs of components that exist on the entity that will be removed
+        let mut removed_components = IndexSet::with_hasher(FixedHasher);
+        // IDs of components that exist on the entity that will be replaced (via an insert in "replace" mode)
+        let mut replaced_components = IndexSet::with_hasher(FixedHasher);
+        // IDs of components that don't exist on the entity that will be inserted
+        let mut added_components = IndexSet::with_hasher(FixedHasher);
+        // Components that may or may not exist on the entity that will be inserted
+        let mut inserted_components = IndexMap::with_hasher(FixedHasher);
+        let mut new_required_components = IndexMap::with_hasher(FixedHasher);
+        let mut bundle_effects = Vec::new();
+
+        for command in &mut buffer.commands {
+            match command {
+                EntityCommandKind::Insert {
+                    storage_index,
+                    insert_mode,
+                    relationship_hook_mode,
+                } => {
+                    let bundle_id = match storage_index {
+                        StorageIndex::Bundle(index) => {
+                            let bundle = &mut buffer.stored_bundles[*index as usize];
+                            let component_ids = &bundle.component_ids;
+                            for (index, component_id) in component_ids.iter().enumerate() {
+                                let is_replacing =
+                                    world.entity_mut(entity_id).contains_id(*component_id)
+                                        && !removed_components.contains(component_id);
+                                let already_queued = inserted_components.contains_key(component_id);
+                                match insert_mode {
+                                    InsertMode::Replace => {
+                                        //std::println!("insert checkpoint 1");
+                                        if is_replacing {
+                                            replaced_components.insert(*component_id);
+                                        } else {
+                                            added_components.insert(*component_id);
+                                        }
+                                        if let Some(previously_queued) = inserted_components.insert(
+                                            *component_id,
+                                            StoredInsert {
+                                                component_ptr: bundle.component_ptrs[index],
+                                                is_replacing,
+                                                relationship_hook_mode: *relationship_hook_mode,
+                                            },
+                                        ) {
+                                            unsafe {
+                                                if let Some(drop_fn) = world
+                                                    .components
+                                                    .get_info_unchecked(*component_id)
+                                                    .drop()
+                                                {
+                                                    drop_fn(previously_queued.component_ptr.into_owning())
+                                                }
+                                            }
+                                            // components_to_drop.push((
+                                            //     *component_id,
+                                            //     previously_queued.component_ptr,
+                                            // ));
+                                        }
+                                    }
+                                    InsertMode::Keep => {
+                                        if is_replacing || already_queued {
+                                            unsafe {
+                                                if let Some(drop_fn) = world
+                                                    .components
+                                                    .get_info_unchecked(*component_id)
+                                                    .drop()
+                                                {
+                                                    drop_fn(bundle.component_ptrs[index].into_owning())
+                                                }
+                                            }
+                                        } else {
+                                            added_components.insert(*component_id);
+                                            inserted_components.insert(
+                                                *component_id,
+                                                StoredInsert {
+                                                    component_ptr: bundle.component_ptrs[index],
+                                                    is_replacing: false,
+                                                    relationship_hook_mode: *relationship_hook_mode,
+                                                },
+                                            );
+                                        }
+                                    }
+                                }
+                                new_required_components.shift_remove(component_id);
+                            }
+                            if bundle.effect.is_some() {
+                                bundle_effects.push(core::mem::replace(&mut bundle.effect, None));
+                            }
+                            world.bundles.init_dynamic_info(
+                                &mut world.storages,
+                                &world.components,
+                                component_ids,
+                            )
+                        }
+                        StorageIndex::Component(index) => {
+                            let component = &buffer.stored_components[*index as usize];
+                            let component_id = &component.component_id;
+                            let is_replacing =
+                                world.entity_mut(entity_id).contains_id(*component_id);
+                            let already_queued = inserted_components.contains_key(component_id);
+                            match insert_mode {
+                                InsertMode::Replace => {
+                                    if is_replacing {
+                                        replaced_components.insert(*component_id);
+                                    } else {
+                                        added_components.insert(*component_id);
+                                    }
+                                    if let Some(previously_queued) = inserted_components.insert(
+                                        *component_id,
+                                        StoredInsert {
+                                            component_ptr: component.component_ptr,
+                                            is_replacing,
+                                            relationship_hook_mode: *relationship_hook_mode,
+                                        },
+                                    ) {
+                                        unsafe {
+                                            if let Some(drop_fn) = world
+                                                .components
+                                                .get_info_unchecked(*component_id)
+                                                .drop()
+                                            {
+                                                drop_fn(previously_queued.component_ptr.into_owning())
+                                            }
+                                        }
+                                    }
+                                }
+                                InsertMode::Keep => {
+                                    if is_replacing || already_queued {
+                                        unsafe {
+                                            if let Some(drop_fn) = world
+                                                .components
+                                                .get_info_unchecked(*component_id)
+                                                .drop()
+                                            {
+                                                drop_fn(component.component_ptr.into_owning())
+                                            }
+                                        }
+                                    } else {
+                                        added_components.insert(*component_id);
+                                        inserted_components.insert(
+                                            *component_id,
+                                            StoredInsert {
+                                                component_ptr: component.component_ptr,
+                                                is_replacing: false,
+                                                relationship_hook_mode: *relationship_hook_mode,
+                                            },
+                                        );
+                                    }
+                                }
+                            }
+                            new_required_components.shift_remove(component_id);
+                            world.bundles.init_component_info(
+                                &mut world.storages,
+                                &world.components,
+                                *component_id,
+                            )
+                        }
+                    };
+                    let bundle_info = unsafe { world.bundles.get_unchecked(bundle_id) };
+                    let previous_archetype_id = new_archetype_id;
+                    new_archetype_id = unsafe {
+                        bundle_info.insert_bundle_into_archetype(
+                            &mut world.archetypes,
+                            &mut world.storages,
+                            &world.components,
+                            &world.observers,
+                            new_archetype_id,
+                        )
+                    };
+                    let required_components = bundle_info.iter_required_components();
+                    let required_component_constructors = &world.archetypes[previous_archetype_id]
+                        .edges()
+                        .get_archetype_after_bundle_insert_internal(bundle_id)
+                        .unwrap()
+                        .required_components;
+                    for (index, component_id) in required_components.enumerate() {
+                        //std::println!("required component");
+                        new_required_components
+                            .insert(component_id, required_component_constructors[index].clone());
+                    }
+                }
+                EntityCommandKind::Remove {
+                    components,
+                    with_requires,
+                } => {
+                    for component_id in components.iter() {
+                        if world.entity_mut(entity_id).contains_id(*component_id) {
+                            removed_components.insert(*component_id);
+                            replaced_components.shift_remove(component_id);
+                        }
+                        added_components.shift_remove(component_id);
+                        if let Some(insert) = inserted_components.shift_remove(component_id) {
+                            unsafe {
+                                if let Some(drop_fn) = world
+                                    .components
+                                    .get_info_unchecked(*component_id)
+                                    .drop()
+                                {
+                                    drop_fn(insert.component_ptr.into_owning())
+                                }
+                            }
+                        }
+                        new_required_components.shift_remove(component_id);
+                    }
+                    let bundle_id = world.bundles.init_dynamic_info(
+                        &mut world.storages,
+                        &world.components,
+                        components,
+                    );
+                    let bundle_info = unsafe { world.bundles.get_unchecked(bundle_id) };
+                    new_archetype_id = unsafe {
+                        bundle_info
+                            .remove_bundle_from_archetype(
+                                &mut world.archetypes,
+                                &mut world.storages,
+                                &world.components,
+                                &world.observers,
+                                new_archetype_id,
+                                true,
+                            )
+                            .unwrap()
+                    };
+                }
+                EntityCommandKind::Despawn => {
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Trigger `on_remove` and `on_replace` hooks/observers before the components are gone
+        let removed_components = removed_components.into_boxed_slice();
+        let replaced_components = replaced_components.into_boxed_slice();
+        {
+            let (initial_archetype, mut deferred_world) = unsafe {
+                let world = world.as_unsafe_world_cell();
+                (
+                    &world.archetypes()[initial_location.archetype_id],
+                    world.into_deferred(),
+                )
+            };
+            if !removed_components.is_empty() {
+                if initial_archetype.has_replace_observer() {
+                    unsafe {
+                        deferred_world.trigger_observers(
+                            ON_REPLACE,
+                            entity_id,
+                            removed_components.iter().copied(),
+                            MaybeLocation::caller(),
+                        );
+                    }
+                }
+                unsafe {
+                    deferred_world.trigger_on_replace(
+                        initial_archetype,
+                        entity_id,
+                        removed_components.iter().copied(),
+                        MaybeLocation::caller(),
+                        RelationshipHookMode::Run,
+                    );
+                }
+            }
+            if !replaced_components.is_empty() {
+                if initial_archetype.has_replace_observer() {
+                    unsafe {
+                        deferred_world.trigger_observers(
+                            ON_REPLACE,
+                            entity_id,
+                            replaced_components.iter().copied(),
+                            MaybeLocation::caller(),
+                        );
+                    }
+                }
+                unsafe {
+                    deferred_world.trigger_on_replace(
+                        initial_archetype,
+                        entity_id,
+                        replaced_components.iter().copied(),
+                        MaybeLocation::caller(),
+                        RelationshipHookMode::Run,
+                    );
+                }
+            }
+            if !removed_components.is_empty() {
+                if initial_archetype.has_remove_observer() {
+                    unsafe {
+                        deferred_world.trigger_observers(
+                            ON_REMOVE,
+                            entity_id,
+                            removed_components.iter().copied(),
+                            MaybeLocation::caller(),
+                        );
+                    }
+                }
+                unsafe {
+                    deferred_world.trigger_on_remove(
+                        initial_archetype,
+                        entity_id,
+                        removed_components.iter().copied(),
+                        MaybeLocation::caller(),
+                    );
+                }
+            }
+        }
+
+        world.flush();
+        world.entity_mut(entity_id).update_location();
+
+        for component_id in removed_components {
+            world.removed_components.send(component_id, entity_id);
+            let storage_type =
+                unsafe { world.components.get_info_unchecked(component_id) }.storage_type();
+            if let StorageType::SparseSet = storage_type {
+                world
+                    .storages
+                    .sparse_sets
+                    .get_mut(component_id)
+                    .unwrap()
+                    .remove(entity_id);
+            }
+        }
+
+        for component_id in replaced_components {
+            let storage_type =
+                unsafe { world.components.get_info_unchecked(component_id) }.storage_type();
+            if let StorageType::SparseSet = storage_type {
+                world
+                    .storages
+                    .sparse_sets
+                    .get_mut(component_id)
+                    .unwrap()
+                    .remove(entity_id);
+            }
+        }
+
+        // Remove entity from its original archetype via swap-remove
+        let initial_archetype = &mut world.archetypes[initial_location.archetype_id];
+        let remove_result = initial_archetype.swap_remove(initial_location.archetype_row);
+        // If an entity was moved into this entity's archetype row, update its archetype row
+        if let Some(swapped_entity) = remove_result.swapped_entity {
+            let swapped_location = world.entities.get(swapped_entity).unwrap();
+            unsafe {
+                world.entities.set(
+                    swapped_entity.index(),
+                    EntityLocation {
+                        archetype_id: swapped_location.archetype_id,
+                        archetype_row: initial_location.archetype_row,
+                        table_id: swapped_location.table_id,
+                        table_row: swapped_location.table_row,
+                    },
+                );
+            }
+        }
+
+        // Add entity to its new archetype, moving it to a new table if necessary
+        let new_archetype = &mut world.archetypes[new_archetype_id];
+        let new_location = if initial_location.table_id == new_archetype.table_id() {
+            unsafe { new_archetype.allocate(entity_id, initial_location.table_row) }
+        } else {
+            let (initial_table, new_table) = world
+                .storages
+                .tables
+                .get_2_mut(initial_location.table_id, new_archetype.table_id());
+
+            let move_result = unsafe {
+                initial_table
+                    .move_to_and_drop_missing_unchecked(initial_location.table_row, new_table)
+            };
+
+            let new_location = unsafe { new_archetype.allocate(entity_id, move_result.new_row) };
+            // If an entity was moved into this entity's table row, update its table row
+            if let Some(swapped_entity) = move_result.swapped_entity {
+                let swapped_location = world.entities.get(swapped_entity).unwrap();
+                unsafe {
+                    world.entities.set(
+                        swapped_entity.index(),
+                        EntityLocation {
+                            archetype_id: swapped_location.archetype_id,
+                            archetype_row: swapped_location.archetype_row,
+                            table_id: swapped_location.table_id,
+                            table_row: initial_location.table_row,
+                        },
+                    );
+                }
+                world.archetypes[swapped_location.archetype_id].set_entity_table_row(
+                    swapped_location.archetype_row,
+                    initial_location.table_row,
+                );
+            }
+            new_location
+        };
+        unsafe {
+            world.entities.set(entity_id.index(), new_location);
+        }
+
+        let added_components = added_components.into_boxed_slice();
+
+        let new_table = &mut world.storages.tables[new_location.table_id];
+        for (&component_id, insert) in &inserted_components {
+            //std::println!("insert checkpoint 2");
+            let component_info = unsafe { world.components.get_info_unchecked(component_id) };
+            let ptr = insert.component_ptr.into_owning();
+            match component_info.storage_type() {
+                StorageType::Table => {
+                    let column = new_table.get_column_mut(component_id).unwrap();
+                    if insert.is_replacing {
+                        unsafe {
+                            column.replace(
+                                new_location.table_row,
+                                ptr,
+                                change_tick,
+                                MaybeLocation::caller(),
+                            );
+                        }
+                    } else {
+                        //std::println!("insert checkpoint 3");
+                        unsafe {
+                            column.initialize(
+                                new_location.table_row,
+                                ptr,
+                                change_tick,
+                                MaybeLocation::caller(),
+                            );
+                        }
+                    }
+                }
+                StorageType::SparseSet => {
+                    let sparse_set = world.storages.sparse_sets.get_mut(component_id).unwrap();
+                    unsafe {
+                        sparse_set.insert(entity_id, ptr, change_tick, MaybeLocation::caller());
+                    }
+                }
+            }
+        }
+
+        for constructor in new_required_components.values() {
+            unsafe {
+                constructor.initialize(
+                    new_table,
+                    &mut world.storages.sparse_sets,
+                    change_tick,
+                    new_location.table_row,
+                    entity_id,
+                    MaybeLocation::caller(),
+                );
+            }
+        }
+
+        world.entity_mut(entity_id).update_location();
+        let new_location = world.entity_mut(entity_id).location();
+
+        // Trigger `on_add` and `on_insert` hooks/observers
+        if !added_components.is_empty() {
+            //std::println!("insert checkpoint 4");
+            let (new_archetype, mut deferred_world) = unsafe {
+                let world = world.as_unsafe_world_cell();
+                (
+                    &world.archetypes()[new_location.archetype_id],
+                    world.into_deferred(),
+                )
+            };
+            unsafe {
+                deferred_world.trigger_on_add(
+                    new_archetype,
+                    entity_id,
+                    added_components.iter().copied(),
+                    MaybeLocation::caller(),
+                );
+            }
+            if new_archetype.has_add_observer() {
+                unsafe {
+                    deferred_world.trigger_observers(
+                        ON_ADD,
+                        entity_id,
+                        added_components.iter().copied(),
+                        MaybeLocation::caller(),
+                    );
+                }
+            }
+        }
+
+        if !inserted_components.is_empty() {
+            //std::println!("insert checkpoint 5");
+            let (new_archetype, mut deferred_world) = unsafe {
+                let world = world.as_unsafe_world_cell();
+                (
+                    &world.archetypes()[new_location.archetype_id],
+                    world.into_deferred(),
+                )
+            };
+            unsafe {
+                deferred_world.trigger_on_insert(
+                    new_archetype,
+                    entity_id,
+                    inserted_components.keys().copied(),
+                    MaybeLocation::caller(),
+                    RelationshipHookMode::Run,
+                );
+            }
+            if new_archetype.has_insert_observer() {
+                unsafe {
+                    deferred_world.trigger_observers(
+                        ON_INSERT,
+                        entity_id,
+                        inserted_components.keys().copied(),
+                        MaybeLocation::caller(),
+                    );
+                }
+            }
+        }
+
+        world.flush();
+        let mut entity = world.entity_mut(entity_id);
+        entity.update_location();
+
+        for effect in bundle_effects {
+            let effect = effect.unwrap();
+            effect(&mut entity);
+        }
+
+        //std::println!("end of batch command");
     }
 }
 
