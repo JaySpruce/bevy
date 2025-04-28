@@ -1367,7 +1367,7 @@ impl ComponentIds {
 /// Use this only if you need to know the id of a component but do not need to modify the contents of the world based on that id.
 #[derive(Clone, Copy)]
 pub struct ComponentsQueuedRegistrator<'w> {
-    components: &'w Components,
+    pub(crate) components: &'w Components,
     ids: &'w ComponentIds,
 }
 

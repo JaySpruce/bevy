@@ -2206,6 +2206,8 @@ impl<'w> EntityWorldMut<'w> {
             )
         };
 
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_removal_triggers").entered();
         // SAFETY: all bundle components exist in World
         unsafe {
             trigger_on_replace_and_on_remove_hooks_and_observers(
@@ -2216,7 +2218,11 @@ impl<'w> EntityWorldMut<'w> {
                 caller,
             );
         }
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
 
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_removal_events").entered();
         let old_archetype = &world.archetypes[location.archetype_id];
         for component_id in bundle_info.iter_explicit_components() {
             if old_archetype.contains(component_id) {
@@ -2235,6 +2241,11 @@ impl<'w> EntityWorldMut<'w> {
                 }
             }
         }
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
+
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_removal_archetype_move").entered();
 
         // SAFETY: `new_archetype_id` is a subset of the components in `old_location.archetype_id`
         // because it is created by removing a bundle from these components.
@@ -2249,6 +2260,9 @@ impl<'w> EntityWorldMut<'w> {
             &mut world.storages,
             new_archetype_id,
         );
+
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
 
         new_location
     }
@@ -4484,10 +4498,7 @@ unsafe fn insert_dynamic_bundle<
         fn get_components(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>)) {
             self.components.for_each(|(t, ptr)| func(t, ptr));
         }
-        fn get_components_with_size(
-            self,
-            _func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize),
-        ) {
+        fn get_components_static(self, _func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId)) {
             unimplemented!();
         }
     }

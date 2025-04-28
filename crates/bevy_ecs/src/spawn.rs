@@ -200,6 +200,17 @@ unsafe impl<R: Relationship, L: SpawnableList<R> + Send + Sync + 'static> Bundle
         <R::RelationshipTarget as Bundle>::get_component_ids(components, ids);
     }
 
+    fn get_valid_component_ids(
+        components: &crate::component::Components,
+        ids: &mut impl FnMut(Option<crate::component::ComponentId>, core::any::TypeId),
+    ) {
+        <R::RelationshipTarget as Bundle>::get_valid_component_ids(components, ids);
+    }
+
+    fn are_components_registered(components: &crate::component::Components) -> bool {
+        <R::RelationshipTarget as Bundle>::are_components_registered(components)
+    }
+
     fn queue_register_components(
         components: &crate::component::ComponentsQueuedRegistrator,
         ids_and_validity: &mut impl FnMut(crate::component::ComponentId, bool),
@@ -228,12 +239,12 @@ impl<R: Relationship, L: SpawnableList<R>> DynamicBundle for SpawnRelatedBundle<
             .get_components(func);
         self
     }
-    fn get_components_with_size(
+    fn get_components_static(
         self,
-        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::OwningPtr<'_>, usize),
+        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::Ptr<'static>, core::any::TypeId),
     ) -> Self::Effect {
         <R::RelationshipTarget as RelationshipTarget>::with_capacity(self.list.size_hint())
-            .get_components_with_size(func);
+            .get_components_static(func);
         self
     }
 }
@@ -264,12 +275,11 @@ impl<R: Relationship, B: Bundle> DynamicBundle for SpawnOneRelated<R, B> {
         <R::RelationshipTarget as RelationshipTarget>::with_capacity(1).get_components(func);
         self
     }
-    fn get_components_with_size(
+    fn get_components_static(
         self,
-        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::OwningPtr<'_>, usize),
+        func: &mut impl FnMut(crate::component::StorageType, bevy_ptr::Ptr<'static>, core::any::TypeId),
     ) -> Self::Effect {
-        <R::RelationshipTarget as RelationshipTarget>::with_capacity(1)
-            .get_components_with_size(func);
+        <R::RelationshipTarget as RelationshipTarget>::with_capacity(1).get_components_static(func);
         self
     }
 }
@@ -288,6 +298,17 @@ unsafe impl<R: Relationship, B: Bundle> Bundle for SpawnOneRelated<R, B> {
         ids: &mut impl FnMut(Option<crate::component::ComponentId>),
     ) {
         <R::RelationshipTarget as Bundle>::get_component_ids(components, ids);
+    }
+
+    fn get_valid_component_ids(
+        components: &crate::component::Components,
+        ids: &mut impl FnMut(Option<crate::component::ComponentId>, core::any::TypeId),
+    ) {
+        <R::RelationshipTarget as Bundle>::get_valid_component_ids(components, ids);
+    }
+
+    fn are_components_registered(components: &crate::component::Components) -> bool {
+        <R::RelationshipTarget as Bundle>::are_components_registered(components)
     }
 
     fn queue_register_components(

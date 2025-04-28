@@ -77,9 +77,11 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
     let mut field_component_ids = Vec::new();
     let mut field_get_component_ids = Vec::new();
+    let mut field_get_valid_component_ids = Vec::new();
+    let mut field_are_components_registered = Vec::new();
     let mut field_queue_register_components = Vec::new();
     let mut field_get_components = Vec::new();
-    let mut field_get_components_with_size = Vec::new();
+    let mut field_get_components_static = Vec::new();
     let mut field_from_components = Vec::new();
     let mut field_required_components = Vec::new();
     for (((i, field_type), field_kind), field) in field_type
@@ -99,6 +101,12 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 field_get_component_ids.push(quote! {
                     <#field_type as #ecs_path::bundle::Bundle>::get_component_ids(components, &mut *ids);
                 });
+                field_get_valid_component_ids.push(quote! {
+                    <#field_type as #ecs_path::bundle::Bundle>::get_valid_component_ids(components, &mut *ids);
+                });
+                field_are_components_registered.push(quote! {
+                    <#field_type as #ecs_path::bundle::Bundle>::are_components_registered(components)
+                });
                 field_queue_register_components.push(quote! {
                     <#field_type as #ecs_path::bundle::Bundle>::queue_register_components(components, &mut *ids_and_validity);
                 });
@@ -107,8 +115,8 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                         field_get_components.push(quote! {
                             self.#field.get_components(&mut *func);
                         });
-                        field_get_components_with_size.push(quote! {
-                            self.#field.get_components_with_size(&mut *func);
+                        field_get_components_static.push(quote! {
+                            self.#field.get_components_static(&mut *func);
                         });
                         field_from_components.push(quote! {
                             #field: <#field_type as #ecs_path::bundle::BundleFromComponents>::from_components(ctx, &mut *func),
@@ -119,8 +127,8 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                         field_get_components.push(quote! {
                             self.#index.get_components(&mut *func);
                         });
-                        field_get_components_with_size.push(quote! {
-                            self.#index.get_components_with_size(&mut *func);
+                        field_get_components_static.push(quote! {
+                            self.#index.get_components_static(&mut *func);
                         });
                         field_from_components.push(quote! {
                             #index: <#field_type as #ecs_path::bundle::BundleFromComponents>::from_components(ctx, &mut *func),
@@ -159,6 +167,19 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 ids: &mut impl FnMut(Option<#ecs_path::component::ComponentId>)
             ){
                 #(#field_get_component_ids)*
+            }
+
+            fn get_valid_component_ids(
+                components: &#ecs_path::component::Components,
+                ids: &mut impl FnMut(Option<#ecs_path::component::ComponentId>, ::core::any::TypeId)
+            ){
+                #(#field_get_valid_component_ids)*
+            }
+
+            fn are_components_registered(
+                components: &#ecs_path::component::Components
+            ) -> bool {
+                #(#field_are_components_registered &&)* true
             }
 
             fn queue_register_components(
@@ -205,11 +226,11 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
             #[allow(unused_variables)]
             #[inline]
-            fn get_components_with_size(
+            fn get_components_static(
                 self,
-                func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::OwningPtr<'_>, usize)
+                func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::OwningPtr<'_>, ::core::any::TypeId)
             ) {
-                #(#field_get_components_with_size)*
+                #(#field_get_components_static)*
             }
         }
     })

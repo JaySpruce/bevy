@@ -108,6 +108,8 @@ where
 pub fn insert(bundle: impl Bundle, mode: InsertMode) -> impl EntityCommand {
     let caller = MaybeLocation::caller();
     move |mut entity: EntityWorldMut| {
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_insert_command").entered();
         entity.insert_with_caller(bundle, mode, caller, RelationshipHookMode::Run);
     }
 }
@@ -157,6 +159,8 @@ pub fn insert_from_world<T: Component + FromWorld>(mode: InsertMode) -> impl Ent
 pub fn remove<T: Bundle>() -> impl EntityCommand {
     let caller = MaybeLocation::caller();
     move |mut entity: EntityWorldMut| {
+        #[cfg(feature = "detailed_trace")]
+        let span = tracing::info_span!("normal_remove_command").entered();
         entity.remove_with_caller::<T>(caller);
     }
 }

@@ -24,9 +24,9 @@ use crate::{
 };
 use alloc::{boxed::Box, vec, vec::Vec};
 use bevy_platform::collections::{HashMap, HashSet};
-use bevy_ptr::{ConstNonNull, OwningPtr};
+use bevy_ptr::{Aligned, ConstNonNull, OwningPtr, Ptr};
 use bevy_utils::TypeIdMap;
-use core::{any::TypeId, ptr::NonNull};
+use core::{any::TypeId, mem::ManuallyDrop, ptr::NonNull};
 use variadics_please::all_tuples;
 
 /// The `Bundle` trait enables insertion and removal of [`Component`]s from an entity.
@@ -156,6 +156,13 @@ pub unsafe trait Bundle: DynamicBundle + Send + Sync + 'static {
     /// Gets this [`Bundle`]'s component ids. This will be [`None`] if the component has not been registered.
     fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>));
 
+    fn get_valid_component_ids(
+        components: &Components,
+        ids: &mut impl FnMut(Option<ComponentId>, TypeId),
+    );
+
+    fn are_components_registered(components: &Components) -> bool;
+
     fn queue_register_components(
         components: &ComponentsQueuedRegistrator,
         ids_and_validity: &mut impl FnMut(ComponentId, bool),
@@ -210,9 +217,9 @@ pub trait DynamicBundle {
     #[doc(hidden)]
     fn get_components(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>)) -> Self::Effect;
 
-    fn get_components_with_size(
+    fn get_components_static(
         self,
-        func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize),
+        func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId),
     ) -> Self::Effect;
 }
 
@@ -255,6 +262,20 @@ unsafe impl<C: Component> Bundle for C {
         ids(components.get_id(TypeId::of::<C>()));
     }
 
+    fn get_valid_component_ids(
+        components: &Components,
+        ids: &mut impl FnMut(Option<ComponentId>, TypeId),
+    ) {
+        ids(
+            components.get_valid_id(TypeId::of::<C>()),
+            TypeId::of::<C>(),
+        );
+    }
+
+    fn are_components_registered(components: &Components) -> bool {
+        components.get_valid_id(TypeId::of::<C>()).is_some()
+    }
+
     fn queue_register_components(
         components: &ComponentsQueuedRegistrator,
         ids_and_validity: &mut impl FnMut(ComponentId, bool),
@@ -291,11 +312,13 @@ impl<C: Component> DynamicBundle for C {
     }
 
     #[inline]
-    fn get_components_with_size(
+    fn get_components_static(
         self,
-        func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize),
+        func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId),
     ) -> Self::Effect {
-        OwningPtr::make(self, |ptr| func(C::STORAGE_TYPE, ptr, size_of::<C>()));
+        let val = Box::leak::<'static>(Box::new(self));
+        let ptr = Ptr::<'static, Aligned>::from(&*val);
+        func(C::STORAGE_TYPE, ptr, TypeId::of::<C>());
     }
 }
 
@@ -324,6 +347,18 @@ macro_rules! tuple_impl {
 
             fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>)){
                 $(<$name as Bundle>::get_component_ids(components, ids);)*
+            }
+
+            fn get_valid_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>, TypeId)){
+                #[cfg(feature = "detailed_trace")]
+                let _span = tracing::info_span!("get_valid_component_ids").entered();
+                $(<$name as Bundle>::get_valid_component_ids(components, ids);)*
+            }
+
+            fn are_components_registered(components: &Components) -> bool {
+                #[cfg(feature = "detailed_trace")]
+                let _span = tracing::info_span!("are_components_registered").entered();
+                $(<$name as Bundle>::are_components_registered(components) && )* true
             }
 
             fn queue_register_components(components: &ComponentsQueuedRegistrator,  ids_and_validity: &mut impl FnMut(ComponentId, bool)){
@@ -406,14 +441,16 @@ macro_rules! tuple_impl {
                 reason = "Zero-length tuples will generate a function body equivalent to `()`; however, this macro is meant for all applicable tuples, and as such it makes no sense to rewrite it just for that case."
             )]
             #[inline(always)]
-            fn get_components_with_size(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>, usize)) -> Self::Effect {
+            fn get_components_static(self, func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId)) -> Self::Effect {
+                #[cfg(feature = "detailed_trace")]
+                let _span = tracing::info_span!("get_components_static").entered();
                 #[allow(
                     non_snake_case,
                     reason = "The names of these variables are provided by the caller, not by us."
                 )]
                 let ($(mut $name,)*) = self;
                 ($(
-                    $name.get_components_with_size(&mut *func),
+                    $name.get_components_static(&mut *func),
                 )*)
             }
         }
@@ -712,6 +749,8 @@ impl BundleInfo {
             bundle_component += 1;
         });
 
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_required_init").entered();
         for required_component in required_components {
             required_component.initialize(
                 table,
@@ -722,6 +761,8 @@ impl BundleInfo {
                 caller,
             );
         }
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
 
         after_effect
     }
@@ -1070,6 +1111,8 @@ impl<'w> BundleInserter<'w> {
         bundle_id: BundleId,
         change_tick: Tick,
     ) -> Self {
+        #[cfg(feature = "detailed_trace")]
+        let span = tracing::info_span!("normal_insertion_prepare").entered();
         // SAFETY: We will not make any accesses to the command queue, component or resource data of this world
         let bundle_info = world.bundles.get_unchecked(bundle_id);
         let bundle_id = bundle_info.id();
@@ -1160,6 +1203,8 @@ impl<'w> BundleInserter<'w> {
         let archetype_after_insert = self.archetype_after_insert.as_ref();
         let archetype = self.archetype.as_ref();
 
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_replacement_triggers").entered();
         // SAFETY: All components in the bundle are guaranteed to exist in the World
         // as they must be initialized before creating the BundleInfo.
         unsafe {
@@ -1184,6 +1229,8 @@ impl<'w> BundleInserter<'w> {
                 );
             }
         }
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
 
         let table = self.table.as_mut();
 
@@ -1191,6 +1238,8 @@ impl<'w> BundleInserter<'w> {
         // so this reference can only be promoted from shared to &mut down here, after they have been ran
         let archetype = self.archetype.as_mut();
 
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_insertion_archetype_move").entered();
         let (new_archetype, new_location, after_effect) = match &mut self.archetype_move_type {
             ArchetypeMoveType::SameArchetype => {
                 // SAFETY: Mutable references do not alias and will be dropped after this block
@@ -1338,6 +1387,11 @@ impl<'w> BundleInserter<'w> {
                 (new_archetype, new_location, after_effect)
             }
         };
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
+
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("normal_insertion_triggers").entered();
 
         let new_archetype = &*new_archetype;
         // SAFETY: We have no outstanding mutable references to world as they were dropped
@@ -1400,6 +1454,8 @@ impl<'w> BundleInserter<'w> {
                 }
             }
         }
+        #[cfg(feature = "detailed_trace")]
+        drop(_span);
 
         (new_location, after_effect)
     }
@@ -1794,7 +1850,7 @@ fn initialize_dynamic_bundle(
     (id, storage_types)
 }
 
-fn sorted_remove<T: Eq + Ord + Copy>(source: &mut Vec<T>, remove: &[T]) {
+pub(crate) fn sorted_remove<T: Eq + Ord + Copy>(source: &mut Vec<T>, remove: &[T]) {
     let mut remove_index = 0;
     source.retain(|value| {
         while remove_index < remove.len() && *value > remove[remove_index] {
