@@ -4498,7 +4498,7 @@ unsafe fn insert_dynamic_bundle<
         fn get_components(self, func: &mut impl FnMut(StorageType, OwningPtr<'_>)) {
             self.components.for_each(|(t, ptr)| func(t, ptr));
         }
-        fn get_components_static(self, _func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId)) {
+        fn get_components_static(self, _func: &mut impl FnMut(StorageType, Ptr<'static>)) {
             unimplemented!();
         }
     }

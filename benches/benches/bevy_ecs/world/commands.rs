@@ -85,18 +85,8 @@ pub fn insert_commands(criterion: &mut Criterion) {
     group.measurement_time(core::time::Duration::from_secs(4));
 
     let entity_count = 10_000;
-    group.bench_function("insert", |bencher| {
+    group.bench_function("insert_two_calls", |bencher| {
         let mut world = World::default();
-        world.register_component::<Matrix>();
-        world.register_component::<Vec3>();
-        world.register_component::<A>();
-        world.register_component::<B>();
-        world.register_component::<C>();
-        world.register_component::<D>();
-        world.register_component::<E>();
-        world.register_component::<F>();
-        world.register_component::<G>();
-        world.register_component::<H>();
         let mut command_queue = CommandQueue::default();
         let mut entities = Vec::new();
         for _ in 0..entity_count {
@@ -105,28 +95,18 @@ pub fn insert_commands(criterion: &mut Criterion) {
         command_queue.apply(&mut world);
 
         bencher.iter(|| {
-            let mut commands = Commands::new(&mut command_queue, &world);
             for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
                 commands
                     .entity(*entity)
                     .remove::<(A, B, C, D)>()
                     .insert((E(4), F(5), G(6), H(7)));
+                command_queue.apply(&mut world);
             }
-            command_queue.apply(&mut world);
         });
     });
-    group.bench_function("insert_batched", |bencher| {
+    group.bench_function("insert_batched_two_calls", |bencher| {
         let mut world = World::default();
-        world.register_component::<Matrix>();
-        world.register_component::<Vec3>();
-        world.register_component::<A>();
-        world.register_component::<B>();
-        world.register_component::<C>();
-        world.register_component::<D>();
-        world.register_component::<E>();
-        world.register_component::<F>();
-        world.register_component::<G>();
-        world.register_component::<H>();
         let mut command_queue = CommandQueue::default();
         let mut entities = Vec::new();
         for _ in 0..entity_count {
@@ -135,57 +115,155 @@ pub fn insert_commands(criterion: &mut Criterion) {
         command_queue.apply(&mut world);
 
         bencher.iter(|| {
-            let mut commands = Commands::new(&mut command_queue, &world);
             for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
                 commands
                     .entity(*entity)
                     .batch()
                     .remove::<(A, B, C, D)>()
                     .insert((E(4), F(5), G(6), H(7)));
+                command_queue.apply(&mut world);
             }
-            command_queue.apply(&mut world);
         });
     });
-    group.bench_function("insert_or_spawn_batch", |bencher| {
+    group.bench_function("insert_four_calls", |bencher| {
         let mut world = World::default();
         let mut command_queue = CommandQueue::default();
         let mut entities = Vec::new();
         for _ in 0..entity_count {
-            entities.push(world.spawn_empty().id());
+            entities.push(world.spawn((A, B, C, D(3))).id());
         }
+        command_queue.apply(&mut world);
 
         bencher.iter(|| {
-            let mut commands = Commands::new(&mut command_queue, &world);
-            let mut values = Vec::with_capacity(entity_count);
             for entity in &entities {
-                values.push((*entity, (Matrix::default(), Vec3::default())));
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .remove::<(A, B)>()
+                    .remove::<(C, D)>()
+                    .insert((E(4), F(5)))
+                    .insert((G(6), H(7)));
+                command_queue.apply(&mut world);
             }
-            #[expect(
-                deprecated,
-                reason = "This needs to be supported for now, and therefore still needs the benchmark."
-            )]
-            commands.insert_or_spawn_batch(values);
-            command_queue.apply(&mut world);
         });
     });
-    group.bench_function("insert_batch", |bencher| {
+    group.bench_function("insert_batched_four_calls", |bencher| {
         let mut world = World::default();
         let mut command_queue = CommandQueue::default();
         let mut entities = Vec::new();
         for _ in 0..entity_count {
-            entities.push(world.spawn_empty().id());
+            entities.push(world.spawn((A, B, C, D(3))).id());
         }
+        command_queue.apply(&mut world);
 
         bencher.iter(|| {
-            let mut commands = Commands::new(&mut command_queue, &world);
-            let mut values = Vec::with_capacity(entity_count);
             for entity in &entities {
-                values.push((*entity, (Matrix::default(), Vec3::default())));
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .batch()
+                    .remove::<(A, B)>()
+                    .remove::<(C, D)>()
+                    .insert((E(4), F(5)))
+                    .insert((G(6), H(7)));
+                command_queue.apply(&mut world);
             }
-            commands.insert_batch(values);
-            command_queue.apply(&mut world);
         });
     });
+    group.bench_function("insert_eight_calls", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn((A, B, C, D(3))).id());
+        }
+        command_queue.apply(&mut world);
+
+        bencher.iter(|| {
+            for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .remove::<A>()
+                    .remove::<B>()
+                    .remove::<C>()
+                    .remove::<D>()
+                    .insert(E(4))
+                    .insert(F(5))
+                    .insert(G(6))
+                    .insert(H(7));
+                command_queue.apply(&mut world);
+            }
+        });
+    });
+    group.bench_function("insert_batched_eight_calls", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn((A, B, C, D(3))).id());
+        }
+        command_queue.apply(&mut world);
+
+        bencher.iter(|| {
+            for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .batch()
+                    .remove::<A>()
+                    .remove::<B>()
+                    .remove::<C>()
+                    .remove::<D>()
+                    .insert(E(4))
+                    .insert(F(5))
+                    .insert(G(6))
+                    .insert(H(7));
+                command_queue.apply(&mut world);
+            }
+        });
+    });
+    // group.bench_function("insert_or_spawn_batch", |bencher| {
+    //     let mut world = World::default();
+    //     let mut command_queue = CommandQueue::default();
+    //     let mut entities = Vec::new();
+    //     for _ in 0..entity_count {
+    //         entities.push(world.spawn_empty().id());
+    //     }
+
+    //     bencher.iter(|| {
+    //         let mut commands = Commands::new(&mut command_queue, &world);
+    //         let mut values = Vec::with_capacity(entity_count);
+    //         for entity in &entities {
+    //             values.push((*entity, (Matrix::default(), Vec3::default())));
+    //         }
+    //         #[expect(
+    //             deprecated,
+    //             reason = "This needs to be supported for now, and therefore still needs the benchmark."
+    //         )]
+    //         commands.insert_or_spawn_batch(values);
+    //         command_queue.apply(&mut world);
+    //     });
+    // });
+    // group.bench_function("insert_batch", |bencher| {
+    //     let mut world = World::default();
+    //     let mut command_queue = CommandQueue::default();
+    //     let mut entities = Vec::new();
+    //     for _ in 0..entity_count {
+    //         entities.push(world.spawn_empty().id());
+    //     }
+
+    //     bencher.iter(|| {
+    //         let mut commands = Commands::new(&mut command_queue, &world);
+    //         let mut values = Vec::with_capacity(entity_count);
+    //         for entity in &entities {
+    //             values.push((*entity, (Matrix::default(), Vec3::default())));
+    //         }
+    //         commands.insert_batch(values);
+    //         command_queue.apply(&mut world);
+    //     });
+    // });
 
     group.finish();
 }

@@ -26,7 +26,7 @@ use alloc::{boxed::Box, vec, vec::Vec};
 use bevy_platform::collections::{HashMap, HashSet};
 use bevy_ptr::{Aligned, ConstNonNull, OwningPtr, Ptr};
 use bevy_utils::TypeIdMap;
-use core::{any::TypeId, mem::ManuallyDrop, ptr::NonNull};
+use core::{any::TypeId, ptr::NonNull};
 use variadics_please::all_tuples;
 
 /// The `Bundle` trait enables insertion and removal of [`Component`]s from an entity.
@@ -156,14 +156,11 @@ pub unsafe trait Bundle: DynamicBundle + Send + Sync + 'static {
     /// Gets this [`Bundle`]'s component ids. This will be [`None`] if the component has not been registered.
     fn get_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>));
 
-    fn get_valid_component_ids(
-        components: &Components,
-        ids: &mut impl FnMut(Option<ComponentId>, TypeId),
-    );
+    fn get_valid_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>));
 
     fn are_components_registered(components: &Components) -> bool;
 
-    fn queue_register_components(
+    fn get_component_ids_or_queue(
         components: &ComponentsQueuedRegistrator,
         ids_and_validity: &mut impl FnMut(ComponentId, bool),
     );
@@ -173,6 +170,8 @@ pub unsafe trait Bundle: DynamicBundle + Send + Sync + 'static {
         _components: &mut ComponentsRegistrator,
         _required_components: &mut RequiredComponents,
     );
+
+    fn component_count() -> usize;
 }
 
 /// Creates a [`Bundle`] by taking it from internal storage.
@@ -219,7 +218,7 @@ pub trait DynamicBundle {
 
     fn get_components_static(
         self,
-        func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId),
+        func: &mut impl FnMut(StorageType, Ptr<'static>),
     ) -> Self::Effect;
 }
 
@@ -262,21 +261,15 @@ unsafe impl<C: Component> Bundle for C {
         ids(components.get_id(TypeId::of::<C>()));
     }
 
-    fn get_valid_component_ids(
-        components: &Components,
-        ids: &mut impl FnMut(Option<ComponentId>, TypeId),
-    ) {
-        ids(
-            components.get_valid_id(TypeId::of::<C>()),
-            TypeId::of::<C>(),
-        );
+    fn get_valid_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>)) {
+        ids(components.get_valid_id(TypeId::of::<C>()));
     }
 
     fn are_components_registered(components: &Components) -> bool {
         components.get_valid_id(TypeId::of::<C>()).is_some()
     }
 
-    fn queue_register_components(
+    fn get_component_ids_or_queue(
         components: &ComponentsQueuedRegistrator,
         ids_and_validity: &mut impl FnMut(ComponentId, bool),
     ) {
@@ -286,6 +279,10 @@ unsafe impl<C: Component> Bundle for C {
             let id = components.queue_register_component::<C>();
             ids_and_validity(id, false);
         }
+    }
+
+    fn component_count() -> usize {
+        1
     }
 }
 
@@ -314,11 +311,11 @@ impl<C: Component> DynamicBundle for C {
     #[inline]
     fn get_components_static(
         self,
-        func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId),
+        func: &mut impl FnMut(StorageType, Ptr<'static>),
     ) -> Self::Effect {
-        let val = Box::leak::<'static>(Box::new(self));
-        let ptr = Ptr::<'static, Aligned>::from(&*val);
-        func(C::STORAGE_TYPE, ptr, TypeId::of::<C>());
+        let heap_value = Box::leak::<'static>(Box::new(self));
+        let ptr = Ptr::<'static, Aligned>::from(&*heap_value);
+        func(C::STORAGE_TYPE, ptr);
     }
 }
 
@@ -349,7 +346,7 @@ macro_rules! tuple_impl {
                 $(<$name as Bundle>::get_component_ids(components, ids);)*
             }
 
-            fn get_valid_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>, TypeId)){
+            fn get_valid_component_ids(components: &Components, ids: &mut impl FnMut(Option<ComponentId>)){
                 #[cfg(feature = "detailed_trace")]
                 let _span = tracing::info_span!("get_valid_component_ids").entered();
                 $(<$name as Bundle>::get_valid_component_ids(components, ids);)*
@@ -361,8 +358,8 @@ macro_rules! tuple_impl {
                 $(<$name as Bundle>::are_components_registered(components) && )* true
             }
 
-            fn queue_register_components(components: &ComponentsQueuedRegistrator,  ids_and_validity: &mut impl FnMut(ComponentId, bool)){
-                $(<$name as Bundle>::queue_register_components(components, ids_and_validity);)*
+            fn get_component_ids_or_queue(components: &ComponentsQueuedRegistrator,  ids_and_validity: &mut impl FnMut(ComponentId, bool)){
+                $(<$name as Bundle>::get_component_ids_or_queue(components, ids_and_validity);)*
             }
 
             fn register_required_components(
@@ -370,6 +367,10 @@ macro_rules! tuple_impl {
                 required_components: &mut RequiredComponents,
             ) {
                 $(<$name as Bundle>::register_required_components(components, required_components);)*
+            }
+
+            fn component_count() -> usize {
+                $(<$name as Bundle>::component_count() + )* 0
             }
         }
 
@@ -441,7 +442,7 @@ macro_rules! tuple_impl {
                 reason = "Zero-length tuples will generate a function body equivalent to `()`; however, this macro is meant for all applicable tuples, and as such it makes no sense to rewrite it just for that case."
             )]
             #[inline(always)]
-            fn get_components_static(self, func: &mut impl FnMut(StorageType, Ptr<'static>, TypeId)) -> Self::Effect {
+            fn get_components_static(self, func: &mut impl FnMut(StorageType, Ptr<'static>)) -> Self::Effect {
                 #[cfg(feature = "detailed_trace")]
                 let _span = tracing::info_span!("get_components_static").entered();
                 #[allow(

@@ -517,6 +517,16 @@ impl Archetype {
             .map(|(component_id, info)| (*component_id, info.archetype_component_id))
     }
 
+    /// Gets an iterator of all of the components in the archetype, along with
+    /// their storage type.
+    pub(crate) fn components_with_storage_type(
+        &self,
+    ) -> impl Iterator<Item = (ComponentId, StorageType)> + '_ {
+        self.components
+            .iter()
+            .map(|(component_id, info)| (*component_id, info.storage_type))
+    }
+
     /// Fetches an immutable reference to the archetype's [`Edges`], a cache of
     /// archetypal relationships.
     #[inline]

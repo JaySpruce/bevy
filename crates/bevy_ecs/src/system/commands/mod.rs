@@ -10,20 +10,14 @@ pub use entity_command::EntityCommand;
 #[cfg(feature = "std")]
 pub use parallel_scope::*;
 
-use alloc::{borrow::ToOwned, boxed::Box, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use bevy_ptr::{Aligned, OwningPtr, Ptr};
-use bevy_utils::TypeIdMap;
-use core::{
-    any::TypeId,
-    marker::PhantomData,
-    mem::{ManuallyDrop, MaybeUninit},
-    ptr::NonNull,
-};
+use core::{marker::PhantomData, mem::MaybeUninit};
 use log::error;
 
 use crate::{
     self as bevy_ecs,
-    bundle::{Bundle, BundleEffect, DynamicBundle, InsertMode, NoBundleEffect},
+    bundle::{Bundle, BundleEffect, InsertMode, NoBundleEffect},
     change_detection::{MaybeLocation, Mut},
     component::{Component, ComponentId, ComponentsQueuedRegistrator, Mutable, StorageType},
     entity::{Entities, Entity, EntityClonerBuilder, EntityDoesNotExistError, EntityLocation},
@@ -1334,6 +1328,7 @@ impl<'a> EntityCommands<'a> {
         }
     }
 
+    #[track_caller]
     pub fn batch(self) -> EntityCommandsBatcher<'a> {
         #[cfg(feature = "detailed_trace")]
         let span = tracing::info_span!("batch_batcher_creation").entered();
@@ -1344,6 +1339,7 @@ impl<'a> EntityCommands<'a> {
         }
     }
 
+    #[track_caller]
     pub fn batch_handled(
         &mut self,
         error_handler: fn(BevyError, ErrorContext),
@@ -2144,6 +2140,8 @@ pub struct EntityCommandsBatcher<'a> {
 
 impl<'a> Drop for EntityCommandsBatcher<'a> {
     fn drop(&mut self) {
+        #[cfg(feature = "detailed_trace")]
+        let _span = tracing::info_span!("batch_command_outside").entered();
         let buffer =
             unsafe { core::mem::replace(&mut self.buffer, MaybeUninit::uninit()).assume_init() };
         self.entity_commands
@@ -2159,15 +2157,22 @@ impl<'a> EntityCommandsBatcher<'a> {
     }
 
     #[track_caller]
-    pub fn insert(&mut self, bundle: impl Bundle) -> &mut Self {
+    #[inline(always)]
+    pub fn insert<B: Bundle>(&mut self, bundle: B) -> &mut Self
+    where
+        B::Effect: NoBundleEffect,
+    {
         #[cfg(feature = "detailed_trace")]
         let _span = tracing::info_span!("batch_insert_call").entered();
-        self.insert_bundle_internal(bundle, InsertMode::Replace, RelationshipHookMode::Run)
+        self.insert_bundle_internal(bundle, InsertMode::Replace);
+        self
     }
 
     #[track_caller]
-    pub fn insert_if<F>(&mut self, bundle: impl Bundle, condition: F) -> &mut Self
+    #[inline(always)]
+    pub fn insert_if<B: Bundle, F>(&mut self, bundle: B, condition: F) -> &mut Self
     where
+        B::Effect: NoBundleEffect,
         F: FnOnce() -> bool,
     {
         if condition() {
@@ -2178,13 +2183,20 @@ impl<'a> EntityCommandsBatcher<'a> {
     }
 
     #[track_caller]
-    pub fn insert_if_new(&mut self, bundle: impl Bundle) -> &mut Self {
-        self.insert_bundle_internal(bundle, InsertMode::Keep, RelationshipHookMode::Run)
+    #[inline(always)]
+    pub fn insert_if_new<B: Bundle>(&mut self, bundle: B) -> &mut Self
+    where
+        B::Effect: NoBundleEffect,
+    {
+        self.insert_bundle_internal(bundle, InsertMode::Keep);
+        self
     }
 
     #[track_caller]
-    pub fn insert_if_new_and<F>(&mut self, bundle: impl Bundle, condition: F) -> &mut Self
+    #[inline(always)]
+    pub fn insert_if_new_and<B: Bundle, F>(&mut self, bundle: B, condition: F) -> &mut Self
     where
+        B::Effect: NoBundleEffect,
         F: FnOnce() -> bool,
     {
         if condition() {
@@ -2195,58 +2207,96 @@ impl<'a> EntityCommandsBatcher<'a> {
     }
 
     #[track_caller]
+    #[inline(always)]
     pub unsafe fn insert_by_id<T: Send + 'static>(
         &mut self,
         component_id: ComponentId,
         value: T,
     ) -> &mut Self {
-        self.insert_component_internal(
-            component_id,
-            value,
-            InsertMode::Replace,
-            RelationshipHookMode::Run,
-        )
+        self.insert_component_internal(component_id, value, InsertMode::Replace);
+        self
     }
 
     #[track_caller]
+    #[inline(always)]
+    pub unsafe fn insert_by_id_if_new<T: Send + 'static>(
+        &mut self,
+        component_id: ComponentId,
+        value: T,
+    ) -> &mut Self {
+        self.insert_component_internal(component_id, value, InsertMode::Keep);
+        self
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub fn insert_with_effect<B: Bundle>(
+        &mut self,
+        bundle: B,
+        insert_mode: InsertMode,
+    ) -> &mut Self {
+        let effect = self.insert_bundle_internal(bundle, insert_mode);
+        self.buffer()
+            .bundle_effects
+            .push(Box::new(move |entity: &mut EntityWorldMut| {
+                effect.apply(entity)
+            }));
+        self
+    }
+
+    #[track_caller]
+    #[inline(always)]
     pub fn remove<B: Bundle>(&mut self) -> &mut Self {
         #[cfg(feature = "detailed_trace")]
         let _span = tracing::info_span!("batch_remove_call").entered();
 
-        let components = self.entity_commands.commands.components_queue.components;
+        let queue = self.entity_commands.commands.components_queue;
         let buffer = self.buffer();
 
-        if !B::are_components_registered(components) {
-            self.entity_commands
-                .queue_handled(entity_command::remove::<B>(), self.error_handler);
-            return self;
-        }
-
-        B::get_component_ids(components, &mut |component_id| {
-            buffer
-                .removed_component_ids
-                .push(unsafe { component_id.unwrap_unchecked() });
+        B::get_component_ids_or_queue(&queue, &mut |component_id, id_is_valid| {
+            if !id_is_valid {
+                buffer.needs_queue_application = true;
+            }
+            buffer.removed_component_ids.push(component_id);
         });
 
         self
     }
 
     #[track_caller]
+    #[inline(always)]
+    pub fn remove_if<B: Bundle, F>(&mut self, condition: F) -> &mut Self
+    where
+        F: FnOnce() -> bool,
+    {
+        if condition() {
+            self.remove::<B>()
+        } else {
+            self
+        }
+    }
+
+    #[track_caller]
+    #[inline(always)]
+    pub fn remove_by_id(&mut self, component_id: ComponentId) -> &mut Self {
+        self.buffer().removed_component_ids.push(component_id);
+        self
+    }
+
+    #[track_caller]
+    #[inline(always)]
     pub fn remove_with_requires<B: Bundle>(&mut self) -> &mut Self {
         self
     }
 
     #[track_caller]
-    pub fn remove_by_id(&mut self, component_id: ComponentId) -> &mut Self {
-        self
-    }
-
-    #[track_caller]
+    #[inline(always)]
     pub fn retain<B: Bundle>(&mut self) -> &mut Self {
         self
     }
 
     #[track_caller]
+    #[inline(always)]
     pub fn clear(&mut self) -> &mut Self {
         self
     }
@@ -2261,103 +2311,61 @@ impl<'a> EntityCommandsBatcher<'a> {
         self.entity_commands.reborrow()
     }
 
-    #[inline]
+    #[inline(always)]
     fn buffer(&mut self) -> &mut EntityCommandBuffer {
         unsafe { self.buffer.assume_init_mut() }
     }
 
     #[track_caller]
+    #[inline(always)]
     pub(crate) fn insert_bundle_internal<B: Bundle>(
         &mut self,
         bundle: B,
-        mode: InsertMode,
-        relationship_hook_mode: RelationshipHookMode,
-    ) -> &mut Self {
-        let components = self.entity_commands.commands.components_queue.components;
+        insert_mode: InsertMode,
+    ) -> B::Effect {
+        let queue = self.entity_commands.commands.components_queue;
         let buffer = self.buffer();
 
-        if !B::are_components_registered(components) {
-            self.entity_commands
-                .queue_handled(entity_command::insert(bundle, mode), self.error_handler);
-            return self;
-        }
-
-        let mut component_count = 0;
-
-        B::get_valid_component_ids(components, &mut |component_id, type_id| {
-            let component_id = unsafe { component_id.unwrap_unchecked() };
-            if !buffer.component_map.contains_key(&type_id) {
-                buffer
-                    .component_map
-                    .insert(type_id, buffer.inserted_component_ids.len());
-                buffer.inserted_component_ids.push(component_id);
-                component_count += 1;
+        B::get_component_ids_or_queue(&queue, &mut |component_id, id_is_valid| {
+            if !id_is_valid {
+                buffer.needs_queue_application = true;
             }
+            buffer.inserted_component_ids.push(component_id);
         });
 
-        let mut to_drop = Vec::new();
-        buffer.inserted_components.reserve_exact(component_count);
-
-        let effect = B::get_components_static(bundle, &mut |storage, ptr, type_id| {
-            if let Some(&index) = buffer.component_map.get(&type_id) {
-                if index == buffer.inserted_components.len() {
-                    buffer.inserted_components.push((
-                        buffer.inserted_component_ids[index],
-                        SendComponentPtr(ptr),
-                        mode,
-                        storage,
-                    ));
-                } else {
-                    match mode {
-                        InsertMode::Replace => {
-                            to_drop.push((
-                                buffer.inserted_component_ids[index],
-                                buffer.inserted_components[index].1.clone(),
-                            ));
-                            buffer.inserted_components[index] = (
-                                buffer.inserted_component_ids[index],
-                                SendComponentPtr(ptr),
-                                mode,
-                                storage,
-                            );
-                        }
-                        InsertMode::Keep => {
-                            to_drop.push((
-                                buffer.inserted_component_ids[index],
-                                SendComponentPtr(ptr),
-                            ));
-                        }
-                    }
-                }
-            }
-        });
-
-        for component in to_drop {
-            if let Some(drop_fn) = unsafe { components.get_info_unchecked(component.0) }.drop() {
-                unsafe {
-                    drop_fn(component.1.into_owning());
-                }
-            }
-        }
-
-        if TypeId::of::<<B as DynamicBundle>::Effect>() != TypeId::of::<()>() {
+        bundle.get_components_static(&mut |storage, ptr| {
             buffer
-                .bundle_effects
-                .push(Box::new(move |entity| effect.apply(entity)));
-        }
-
-        self
+                .inserted_components
+                .push((SendComponentPtr(ptr), insert_mode, storage));
+        })
     }
 
     #[track_caller]
+    #[inline(always)]
     pub(crate) fn insert_component_internal<T: Send + 'static>(
         &mut self,
         component_id: ComponentId,
         value: T,
         insert_mode: InsertMode,
-        relationship_hook_mode: RelationshipHookMode,
-    ) -> &mut Self {
-        self
+    ) {
+        if let Some(info) = self
+            .entity_commands
+            .commands
+            .components_queue
+            .get_info(component_id)
+        {
+            let storage = info.storage_type();
+
+            let heap_value = Box::leak::<'static>(Box::new(value));
+            let ptr = Ptr::<'static, Aligned>::from(&*heap_value);
+
+            let buffer = self.buffer();
+
+            buffer.inserted_component_ids.push(component_id);
+            buffer
+                .inserted_components
+                .push((SendComponentPtr(ptr), insert_mode, storage));
+        }
     }
 }
 
@@ -2372,15 +2380,31 @@ impl SendComponentPtr {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct EntityCommandBuffer {
+    needs_queue_application: bool,
     despawn: bool,
     clear: bool,
-    component_map: TypeIdMap<usize>,
-    inserted_components: Vec<(ComponentId, SendComponentPtr, InsertMode, StorageType)>,
+    inserted_components: Vec<(SendComponentPtr, InsertMode, StorageType)>,
     inserted_component_ids: Vec<ComponentId>,
     removed_component_ids: Vec<ComponentId>,
     bundle_effects: Vec<Box<dyn FnOnce(&mut EntityWorldMut) + Send + 'static>>,
+    pub(crate) caller: MaybeLocation,
+}
+
+impl Default for EntityCommandBuffer {
+    #[track_caller]
+    fn default() -> Self {
+        Self {
+            caller: MaybeLocation::caller(),
+            needs_queue_application: false,
+            despawn: false,
+            clear: false,
+            inserted_components: Vec::new(),
+            inserted_component_ids: Vec::new(),
+            removed_component_ids: Vec::new(),
+            bundle_effects: Vec::new(),
+        }
+    }
 }
 
 impl EntityCommandBuffer {
@@ -2389,64 +2413,75 @@ impl EntityCommandBuffer {
     }
 }
 
-fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
-    #[cfg(feature = "detailed_trace")]
-    let _span = tracing::info_span!("batch_command_outside").entered();
-
-    let has_removed_components = !buffer.removed_component_ids.is_empty();
-    let has_inserted_components = !buffer.inserted_component_ids.is_empty();
-    move |entity: EntityWorldMut| {
+fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
+    buffer.removed_component_ids.sort_unstable();
+    let caller = buffer.caller;
+    move |mut entity: EntityWorldMut| {
         #[cfg(feature = "detailed_trace")]
         let _span_a = tracing::info_span!("batch_command").entered();
+
         let entity_id = entity.id();
         let initial_location = entity.location();
-        let initial_archetype_id = initial_location.archetype_id;
-        let world = entity.into_world_mut();
+        let world = unsafe { entity.world_mut() };
         let change_tick = world.change_tick();
 
-        let next_archetype_id = if !has_removed_components {
-            initial_archetype_id
-        } else {
+        if buffer.needs_queue_application {
+            world.components_registrator().apply_queued_registrations();
+        }
+
+        let initial_archetype_ptr: *mut _ = &mut world.archetypes[initial_location.archetype_id];
+
+        let mut final_archetype_id = initial_location.archetype_id;
+
+        if !buffer.removed_component_ids.is_empty() {
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_removal_prepare").entered();
+
+            let initial_archetype = unsafe { &*initial_archetype_ptr };
+
             let removed_bundle_id = world.bundles.init_dynamic_info(
                 &mut world.storages,
                 &world.components,
                 &buffer.removed_component_ids,
             );
 
-            let initial_archetype = &mut world.archetypes[initial_archetype_id];
-            let archetype_after_remove_result = initial_archetype
-                .edges()
-                .get_archetype_after_bundle_remove(removed_bundle_id);
+            let component_storage_types = unsafe {
+                world
+                    .bundles
+                    .get_storages_unchecked(removed_bundle_id)
+                    .iter()
+            };
+
             let mut removed_table_components = Vec::new();
             let mut removed_sparse_set_components = Vec::new();
-
-            for component_id in buffer.removed_component_ids {
-                if initial_archetype.contains(component_id) {
-                    // SAFETY: bundle components were already initialized by bundles.get_info
-                    let component_info =
-                        unsafe { world.components.get_info_unchecked(component_id) };
-                    match component_info.storage_type() {
-                        StorageType::Table => removed_table_components.push(component_id),
-                        StorageType::SparseSet => {
-                            removed_sparse_set_components.push(component_id);
+            core::iter::zip(buffer.removed_component_ids, component_storage_types).for_each(
+                |(component_id, &storage_type)| {
+                    if initial_archetype.contains(component_id) {
+                        match storage_type {
+                            StorageType::Table => removed_table_components.push(component_id),
+                            StorageType::SparseSet => {
+                                removed_sparse_set_components.push(component_id);
+                            }
                         }
                     }
-                }
-            }
+                },
+            );
 
-            // Sort removed components so we can do an efficient "sorted remove".
-            // Archetype components are already sorted.
-            removed_table_components.sort_unstable();
-            removed_sparse_set_components.sort_unstable();
-
-            let next_archetype_id = if let Some(Some(result)) = archetype_after_remove_result {
-                result
+            if let Some(Some(result)) = initial_archetype
+                .edges()
+                .get_archetype_after_bundle_remove(removed_bundle_id)
+            {
+                final_archetype_id = result;
             } else {
-                let mut next_table_components = initial_archetype.table_components().collect();
-                let mut next_sparse_set_components =
-                    initial_archetype.sparse_set_components().collect();
+                let mut next_table_components = Vec::new();
+                let mut next_sparse_set_components = Vec::new();
+                initial_archetype.components_with_storage_type().for_each(
+                    |(component_id, storage_type)| match storage_type {
+                        StorageType::Table => next_table_components.push(component_id),
+                        StorageType::SparseSet => next_sparse_set_components.push(component_id),
+                    },
+                );
+
                 crate::bundle::sorted_remove(&mut next_table_components, &removed_table_components);
                 crate::bundle::sorted_remove(
                     &mut next_sparse_set_components,
@@ -2465,7 +2500,7 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
                     }
                 };
 
-                let next_archetype_id = unsafe {
+                final_archetype_id = unsafe {
                     world.archetypes.get_id_or_insert(
                         &world.components,
                         &world.observers,
@@ -2475,113 +2510,74 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
                     )
                 };
 
-                let initial_archetype = &mut world.archetypes[initial_archetype_id];
                 // Cache the result in an edge.
-                initial_archetype
+                unsafe { &mut *initial_archetype_ptr }
                     .edges_mut()
                     .cache_archetype_after_bundle_remove(
                         removed_bundle_id,
-                        Some(next_archetype_id),
+                        Some(final_archetype_id),
                     );
-
-                next_archetype_id
             };
             #[cfg(feature = "detailed_trace")]
             drop(_span_b);
-
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_removal_triggers").entered();
-            {
-                let (initial_archetype, mut deferred_world) = unsafe {
-                    let world = world.as_unsafe_world_cell();
-                    (
-                        &world.archetypes()[initial_archetype_id],
-                        world.into_deferred(),
-                    )
-                };
 
-                if initial_archetype.has_replace_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_REPLACE,
-                            entity_id,
-                            removed_table_components.iter().copied(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
-                if initial_archetype.has_replace_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_REPLACE,
-                            entity_id,
-                            removed_sparse_set_components.iter().copied(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
-                unsafe {
-                    deferred_world.trigger_on_replace(
-                        initial_archetype,
-                        entity_id,
-                        removed_table_components.iter().copied(),
-                        MaybeLocation::caller(),
-                        RelationshipHookMode::Run,
-                    );
-                }
-                unsafe {
-                    deferred_world.trigger_on_replace(
-                        initial_archetype,
-                        entity_id,
-                        removed_sparse_set_components.iter().copied(),
-                        MaybeLocation::caller(),
-                        RelationshipHookMode::Run,
-                    );
-                }
+            let mut deferred_world = unsafe { world.as_unsafe_world_cell().into_deferred() };
 
-                if initial_archetype.has_remove_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_REMOVE,
-                            entity_id,
-                            removed_table_components.iter().copied(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
-                if initial_archetype.has_remove_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_REMOVE,
-                            entity_id,
-                            removed_sparse_set_components.iter().copied(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
+            if initial_archetype.has_replace_observer() {
                 unsafe {
-                    deferred_world.trigger_on_remove(
-                        initial_archetype,
+                    deferred_world.trigger_observers(
+                        ON_REPLACE,
                         entity_id,
-                        removed_table_components.iter().copied(),
-                        MaybeLocation::caller(),
-                    );
-                }
-                unsafe {
-                    deferred_world.trigger_on_remove(
-                        initial_archetype,
-                        entity_id,
-                        removed_sparse_set_components.iter().copied(),
-                        MaybeLocation::caller(),
+                        removed_table_components
+                            .iter()
+                            .chain(removed_sparse_set_components.iter())
+                            .copied(),
+                        caller,
                     );
                 }
             }
+            unsafe {
+                deferred_world.trigger_on_replace(
+                    initial_archetype,
+                    entity_id,
+                    removed_table_components
+                        .iter()
+                        .chain(removed_sparse_set_components.iter())
+                        .copied(),
+                    caller,
+                    RelationshipHookMode::Run,
+                );
+            }
+
+            if initial_archetype.has_remove_observer() {
+                unsafe {
+                    deferred_world.trigger_observers(
+                        ON_REMOVE,
+                        entity_id,
+                        removed_table_components
+                            .iter()
+                            .chain(removed_sparse_set_components.iter())
+                            .copied(),
+                        caller,
+                    );
+                }
+            }
+            unsafe {
+                deferred_world.trigger_on_remove(
+                    initial_archetype,
+                    entity_id,
+                    removed_table_components
+                        .iter()
+                        .chain(removed_sparse_set_components.iter())
+                        .copied(),
+                    caller,
+                );
+            }
+
             #[cfg(feature = "detailed_trace")]
             drop(_span_b);
-
-            world.flush();
-            world.entity_mut(entity_id).update_location();
-
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_removal_events").entered();
 
@@ -2597,17 +2593,16 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
                     .unwrap()
                     .remove(entity_id);
             }
-
-            #[cfg(feature = "detailed_trace")]
-            drop(_span_b);
-            next_archetype_id
         };
 
-        let (new_archetype_id, insert_bundle_id) = if !has_inserted_components {
-            (next_archetype_id, None)
-        } else {
+        let pre_insert_archetype_id = final_archetype_id;
+        let pre_insert_archetype_ptr: *const _ = &world.archetypes()[pre_insert_archetype_id];
+        let mut insert_edge_ptr: Option<*const _> = None;
+
+        if !buffer.inserted_component_ids.is_empty() {
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_insertion_prepare").entered();
+
             let bundle_id = world.bundles.init_dynamic_info(
                 &mut world.storages,
                 &world.components,
@@ -2615,75 +2610,60 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
             );
 
             let bundle_info = unsafe { world.bundles.get_unchecked(bundle_id) };
-            let new_archetype_id = unsafe {
+
+            final_archetype_id = unsafe {
                 bundle_info.insert_bundle_into_archetype(
                     &mut world.archetypes,
                     &mut world.storages,
                     &world.components,
                     &world.observers,
-                    next_archetype_id,
+                    pre_insert_archetype_id,
                 )
             };
 
-            let (next_archetype, mut deferred_world) = unsafe {
-                let world = world.as_unsafe_world_cell();
-                (
-                    &world.archetypes()[next_archetype_id],
-                    world.into_deferred(),
-                )
-            };
+            let pre_insert_archetype = unsafe { &*pre_insert_archetype_ptr };
+            let mut deferred_world = unsafe { world.as_unsafe_world_cell().into_deferred() };
 
-            let insert_info = next_archetype
-                .edges()
-                .get_archetype_after_bundle_insert_internal(bundle_id)
-                .unwrap();
+            insert_edge_ptr = Some(
+                pre_insert_archetype
+                    .edges()
+                    .get_archetype_after_bundle_insert_internal(bundle_id)
+                    .unwrap(),
+            );
+            let insert_edge = unsafe { &*insert_edge_ptr.unwrap_unchecked() };
 
             #[cfg(feature = "detailed_trace")]
             drop(_span_b);
-
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_replacement_triggers").entered();
-            if next_archetype.has_replace_observer() {
+
+            if pre_insert_archetype.has_replace_observer() {
                 unsafe {
                     deferred_world.trigger_observers(
                         ON_REPLACE,
                         entity_id,
-                        insert_info.iter_existing(),
-                        MaybeLocation::caller(),
+                        insert_edge.iter_existing(),
+                        caller,
                     );
                 }
             }
             unsafe {
                 deferred_world.trigger_on_replace(
-                    next_archetype,
+                    pre_insert_archetype,
                     entity_id,
-                    insert_info.iter_existing(),
-                    MaybeLocation::caller(),
+                    insert_edge.iter_existing(),
+                    caller,
                     RelationshipHookMode::Run,
                 );
             }
-            #[cfg(feature = "detailed_trace")]
-            drop(_span_b);
-
-            (new_archetype_id, Some(bundle_id))
-        };
-
-        // Execute any commands queued by hooks/observers, then make sure the entity
-        // still exists and we have its real location
-        world.flush();
-        let current_location = if let Ok(mut entity_mut) = world.get_entity_mut(entity_id) {
-            entity_mut.update_location();
-            entity_mut.location()
-        } else {
-            return;
-        };
+        }
 
         #[cfg(feature = "detailed_trace")]
         let _span_b = tracing::info_span!("batch_archetype_move").entered();
 
         // Remove entity from its original archetype via swap-remove
-        let current_archetype = &mut world.archetypes[current_location.archetype_id];
-        let remove_result = current_archetype.swap_remove(current_location.archetype_row);
+        let remove_result =
+            unsafe { &mut *initial_archetype_ptr }.swap_remove(initial_location.archetype_row);
         // If an entity was moved into this entity's archetype row, update its archetype row
         if let Some(swapped_entity) = remove_result.swapped_entity {
             let swapped_location = world.entities.get(swapped_entity).unwrap();
@@ -2692,7 +2672,7 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
                     swapped_entity.index(),
                     EntityLocation {
                         archetype_id: swapped_location.archetype_id,
-                        archetype_row: current_location.archetype_row,
+                        archetype_row: initial_location.archetype_row,
                         table_id: swapped_location.table_id,
                         table_row: swapped_location.table_row,
                     },
@@ -2700,22 +2680,24 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
             }
         }
 
+        let final_archetype_ptr: *mut _ = &mut world.archetypes[final_archetype_id];
+        let final_archetype = unsafe { &mut *final_archetype_ptr };
+        let final_table_ptr: *mut _ = &mut world.storages.tables[final_archetype.table_id()];
+
         // Add entity to its new archetype, moving it to a new table if necessary
-        let new_archetype = &mut world.archetypes[new_archetype_id];
-        let new_location = if current_location.table_id == new_archetype.table_id() {
-            unsafe { new_archetype.allocate(entity_id, current_location.table_row) }
+        let final_location = if initial_location.table_id == final_archetype.table_id() {
+            unsafe { final_archetype.allocate(entity_id, initial_location.table_row) }
         } else {
-            let (current_table, new_table) = world
-                .storages
-                .tables
-                .get_2_mut(current_location.table_id, new_archetype.table_id());
+            let initial_table = &mut world.storages.tables[initial_location.table_id];
+            let final_table = unsafe { &mut *final_table_ptr };
 
             let move_result = unsafe {
-                current_table
-                    .move_to_and_drop_missing_unchecked(current_location.table_row, new_table)
+                initial_table
+                    .move_to_and_drop_missing_unchecked(initial_location.table_row, final_table)
             };
 
-            let new_location = unsafe { new_archetype.allocate(entity_id, move_result.new_row) };
+            let final_location =
+                unsafe { final_archetype.allocate(entity_id, move_result.new_row) };
             // If an entity was moved into this entity's table row, update its table row
             if let Some(swapped_entity) = move_result.swapped_entity {
                 let swapped_location = world.entities.get(swapped_entity).unwrap();
@@ -2726,154 +2708,149 @@ fn batch_command(buffer: EntityCommandBuffer) -> impl EntityCommand {
                             archetype_id: swapped_location.archetype_id,
                             archetype_row: swapped_location.archetype_row,
                             table_id: swapped_location.table_id,
-                            table_row: current_location.table_row,
+                            table_row: initial_location.table_row,
                         },
                     );
                 }
                 world.archetypes[swapped_location.archetype_id].set_entity_table_row(
                     swapped_location.archetype_row,
-                    current_location.table_row,
+                    initial_location.table_row,
                 );
             }
-            new_location
+            final_location
         };
+
         unsafe {
-            world.entities.set(entity_id.index(), new_location);
+            world.entities.set(entity_id.index(), final_location);
         }
 
-        let new_table = &mut world.storages.tables[new_location.table_id];
-        let current_archetype = &world.archetypes[current_location.archetype_id];
-        for (component_id, component_ptr, insert_mode, storage_type) in buffer.inserted_components {
+        let pre_insert_archetype = unsafe { &*pre_insert_archetype_ptr };
+        let final_table = unsafe { &mut *final_table_ptr };
+
+        for (component_id, (component_ptr, insert_mode, storage_type)) in
+            core::iter::zip(buffer.inserted_component_ids, buffer.inserted_components)
+        {
             let ptr = component_ptr.into_owning();
             match storage_type {
                 StorageType::Table => {
-                    let column = new_table.get_column_mut(component_id).unwrap();
-                    if current_archetype.contains(component_id) {
+                    let column =
+                        unsafe { final_table.get_column_mut(component_id).unwrap_unchecked() };
+                    if pre_insert_archetype.contains(component_id) {
                         unsafe {
-                            column.replace(
-                                new_location.table_row,
-                                ptr,
-                                change_tick,
-                                MaybeLocation::caller(),
-                            );
+                            match insert_mode {
+                                InsertMode::Replace => {
+                                    column.replace(
+                                        final_location.table_row,
+                                        ptr,
+                                        change_tick,
+                                        caller,
+                                    );
+                                }
+                                InsertMode::Keep => {
+                                    if let Some(drop_fn) = final_table.get_drop_for(component_id) {
+                                        drop_fn(ptr);
+                                    }
+                                }
+                            }
                         }
                     } else {
                         unsafe {
-                            column.initialize(
-                                new_location.table_row,
-                                ptr,
-                                change_tick,
-                                MaybeLocation::caller(),
-                            );
+                            column.initialize(final_location.table_row, ptr, change_tick, caller);
                         }
                     }
                 }
                 StorageType::SparseSet => {
                     let sparse_set = world.storages.sparse_sets.get_mut(component_id).unwrap();
-                    unsafe {
-                        sparse_set.insert(entity_id, ptr, change_tick, MaybeLocation::caller());
-                    }
-                }
-            }
-        }
-
-        if let Some(bundle_id) = insert_bundle_id {
-            let world = world.as_unsafe_world_cell();
-            if let Some(insert_info) = world.archetypes()[next_archetype_id]
-                .edges()
-                .get_archetype_after_bundle_insert_internal(bundle_id)
-            {
-                #[cfg(feature = "detailed_trace")]
-                let _span_c = tracing::info_span!("batch_required_init").entered();
-                {
-                    let (sparse_sets, new_table) = {
-                        let world = unsafe { world.world_mut() };
-                        (
-                            &mut world.storages.sparse_sets,
-                            &mut world.storages.tables[new_location.table_id],
-                        )
-                    };
-                    for constructor in insert_info.required_components.iter() {
+                    if !sparse_set.contains(entity_id) || insert_mode == InsertMode::Replace {
                         unsafe {
-                            constructor.initialize(
-                                new_table,
-                                sparse_sets,
-                                change_tick,
-                                current_location.table_row,
-                                entity_id,
-                                MaybeLocation::caller(),
-                            );
+                            sparse_set.insert(entity_id, ptr, change_tick, caller);
+                        }
+                    } else {
+                        if let Some(drop_fn) = sparse_set.get_drop() {
+                            unsafe {
+                                drop_fn(ptr);
+                            }
                         }
                     }
                 }
-                #[cfg(feature = "detailed_trace")]
-                drop(_span_c);
-                #[cfg(feature = "detailed_trace")]
-                drop(_span_b);
-
-                #[cfg(feature = "detailed_trace")]
-                let _span_c = tracing::info_span!("batch_insertion_triggers").entered();
-
-                let (new_archetype, mut deferred_world) = unsafe {
-                    (
-                        &world.archetypes()[new_location.archetype_id],
-                        world.into_deferred(),
-                    )
-                };
-
-                unsafe {
-                    deferred_world.trigger_on_add(
-                        new_archetype,
-                        entity_id,
-                        insert_info.iter_added(),
-                        MaybeLocation::caller(),
-                    );
-                }
-                if new_archetype.has_add_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_ADD,
-                            entity_id,
-                            insert_info.iter_added(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
-                unsafe {
-                    deferred_world.trigger_on_insert(
-                        new_archetype,
-                        entity_id,
-                        insert_info.iter_inserted(),
-                        MaybeLocation::caller(),
-                        RelationshipHookMode::Run,
-                    );
-                }
-                if new_archetype.has_insert_observer() {
-                    unsafe {
-                        deferred_world.trigger_observers(
-                            ON_INSERT,
-                            entity_id,
-                            insert_info.iter_inserted(),
-                            MaybeLocation::caller(),
-                        );
-                    }
-                }
-                #[cfg(feature = "detailed_trace")]
-                drop(_span_c);
             }
         }
 
-        // world.flush();
-        // let mut entity = if let Ok(mut entity_mut) = world.get_entity_mut(entity_id) {
-        //     entity_mut.update_location();
-        //     entity_mut
-        // } else {
-        //     return;
-        // };
+        if let Some(insert_edge_ptr) = insert_edge_ptr {
+            #[cfg(feature = "detailed_trace")]
+            let _span_c = tracing::info_span!("batch_required_init").entered();
 
-        // for effect in buffer.bundle_effects {
-        //     effect(&mut entity);
-        // }
+            let insert_edge = unsafe { &*insert_edge_ptr };
+            let sparse_sets = &mut world.storages.sparse_sets;
+
+            for constructor in insert_edge.required_components.iter() {
+                unsafe {
+                    constructor.initialize(
+                        final_table,
+                        sparse_sets,
+                        change_tick,
+                        final_location.table_row,
+                        entity_id,
+                        caller,
+                    );
+                }
+            }
+
+            #[cfg(feature = "detailed_trace")]
+            drop(_span_c);
+            #[cfg(feature = "detailed_trace")]
+            drop(_span_b);
+
+            #[cfg(feature = "detailed_trace")]
+            let _span_c = tracing::info_span!("batch_insertion_triggers").entered();
+
+            let final_archetype = unsafe { &*final_archetype_ptr };
+            let mut deferred_world = unsafe { world.as_unsafe_world_cell().into_deferred() };
+
+            unsafe {
+                deferred_world.trigger_on_add(
+                    final_archetype,
+                    entity_id,
+                    insert_edge.iter_added(),
+                    caller,
+                );
+            }
+            if final_archetype.has_add_observer() {
+                unsafe {
+                    deferred_world.trigger_observers(
+                        ON_ADD,
+                        entity_id,
+                        insert_edge.iter_added(),
+                        caller,
+                    );
+                }
+            }
+            unsafe {
+                deferred_world.trigger_on_insert(
+                    final_archetype,
+                    entity_id,
+                    insert_edge.iter_inserted(),
+                    caller,
+                    RelationshipHookMode::Run,
+                );
+            }
+            if final_archetype.has_insert_observer() {
+                unsafe {
+                    deferred_world.trigger_observers(
+                        ON_INSERT,
+                        entity_id,
+                        insert_edge.iter_inserted(),
+                        caller,
+                    );
+                }
+            }
+            #[cfg(feature = "detailed_trace")]
+            drop(_span_c);
+
+            for effect in buffer.bundle_effects {
+                effect(&mut entity);
+            }
+        }
     }
 }
 

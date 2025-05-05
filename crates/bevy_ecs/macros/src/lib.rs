@@ -79,7 +79,8 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
     let mut field_get_component_ids = Vec::new();
     let mut field_get_valid_component_ids = Vec::new();
     let mut field_are_components_registered = Vec::new();
-    let mut field_queue_register_components = Vec::new();
+    let mut field_get_component_ids_or_queue = Vec::new();
+    let mut field_component_count = Vec::new();
     let mut field_get_components = Vec::new();
     let mut field_get_components_static = Vec::new();
     let mut field_from_components = Vec::new();
@@ -107,8 +108,11 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 field_are_components_registered.push(quote! {
                     <#field_type as #ecs_path::bundle::Bundle>::are_components_registered(components)
                 });
-                field_queue_register_components.push(quote! {
-                    <#field_type as #ecs_path::bundle::Bundle>::queue_register_components(components, &mut *ids_and_validity);
+                field_get_component_ids_or_queue.push(quote! {
+                    <#field_type as #ecs_path::bundle::Bundle>::get_component_ids_or_queue(components, &mut *ids_and_validity);
+                });
+                field_component_count.push(quote! {
+                    <#field_type as #ecs_path::bundle::Bundle>::component_count()
                 });
                 match field {
                     Some(field) => {
@@ -171,7 +175,7 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
 
             fn get_valid_component_ids(
                 components: &#ecs_path::component::Components,
-                ids: &mut impl FnMut(Option<#ecs_path::component::ComponentId>, ::core::any::TypeId)
+                ids: &mut impl FnMut(Option<#ecs_path::component::ComponentId>)
             ){
                 #(#field_get_valid_component_ids)*
             }
@@ -182,11 +186,11 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 #(#field_are_components_registered &&)* true
             }
 
-            fn queue_register_components(
+            fn get_component_ids_or_queue(
                 components: &#ecs_path::component::ComponentsQueuedRegistrator,
                 ids_and_validity: &mut impl FnMut(#ecs_path::component::ComponentId, bool)
             ){
-                #(#field_queue_register_components)*
+                #(#field_get_component_ids_or_queue)*
             }
 
             fn register_required_components(
@@ -194,6 +198,10 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
                 required_components: &mut #ecs_path::component::RequiredComponents
             ){
                 #(#field_required_components)*
+            }
+
+            fn component_count() -> usize {
+                #(#field_component_count +)* 0
             }
         }
 
@@ -228,7 +236,7 @@ pub fn derive_bundle(input: TokenStream) -> TokenStream {
             #[inline]
             fn get_components_static(
                 self,
-                func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::OwningPtr<'_>, ::core::any::TypeId)
+                func: &mut impl FnMut(#ecs_path::component::StorageType, #ecs_path::ptr::Ptr<'static>)
             ) {
                 #(#field_get_components_static)*
             }
