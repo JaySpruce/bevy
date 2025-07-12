@@ -66,6 +66,9 @@ pub fn spawn_commands(criterion: &mut Criterion) {
 struct Matrix([[f32; 4]; 4]);
 
 #[derive(Default, Component)]
+struct BigMatrix([[f32; 16]; 16]);
+
+#[derive(Default, Component)]
 struct Vec3([f32; 3]);
 
 #[derive(Component)]
@@ -220,6 +223,47 @@ pub fn insert_commands(criterion: &mut Criterion) {
                     .insert(F(5))
                     .insert(G(6))
                     .insert(H(7));
+                command_queue.apply(&mut world);
+            }
+        });
+    });
+    group.bench_function("insert_two_calls_big_move", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn((A, B, C, D(3), BigMatrix::default())).id());
+        }
+        command_queue.apply(&mut world);
+
+        bencher.iter(|| {
+            for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .remove::<(A, B, C, D)>()
+                    .insert((E(4), F(5), G(6), H(7)));
+                command_queue.apply(&mut world);
+            }
+        });
+    });
+    group.bench_function("insert_batched_two_calls_big_move", |bencher| {
+        let mut world = World::default();
+        let mut command_queue = CommandQueue::default();
+        let mut entities = Vec::new();
+        for _ in 0..entity_count {
+            entities.push(world.spawn((A, B, C, D(3), BigMatrix::default())).id());
+        }
+        command_queue.apply(&mut world);
+
+        bencher.iter(|| {
+            for entity in &entities {
+                let mut commands = Commands::new(&mut command_queue, &world);
+                commands
+                    .entity(*entity)
+                    .batch()
+                    .remove::<(A, B, C, D)>()
+                    .insert((E(4), F(5), G(6), H(7)));
                 command_queue.apply(&mut world);
             }
         });

@@ -2430,6 +2430,7 @@ fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
         }
 
         let initial_archetype_ptr: *mut _ = &mut world.archetypes[initial_location.archetype_id];
+        let initial_archetype = unsafe { &mut *initial_archetype_ptr };
 
         let mut final_archetype_id = initial_location.archetype_id;
 
@@ -2437,7 +2438,7 @@ fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
             #[cfg(feature = "detailed_trace")]
             let _span_b = tracing::info_span!("batch_removal_prepare").entered();
 
-            let initial_archetype = unsafe { &*initial_archetype_ptr };
+            //let initial_archetype = unsafe { &*initial_archetype_ptr };
 
             let removed_bundle_id = world.bundles.init_dynamic_info(
                 &mut world.storages,
@@ -2511,7 +2512,8 @@ fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
                 };
 
                 // Cache the result in an edge.
-                unsafe { &mut *initial_archetype_ptr }
+                //unsafe { &mut *initial_archetype_ptr }
+                initial_archetype
                     .edges_mut()
                     .cache_archetype_after_bundle_remove(
                         removed_bundle_id,
@@ -2662,8 +2664,7 @@ fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
         let _span_b = tracing::info_span!("batch_archetype_move").entered();
 
         // Remove entity from its original archetype via swap-remove
-        let remove_result =
-            unsafe { &mut *initial_archetype_ptr }.swap_remove(initial_location.archetype_row);
+        let remove_result = initial_archetype.swap_remove(initial_location.archetype_row);
         // If an entity was moved into this entity's archetype row, update its archetype row
         if let Some(swapped_entity) = remove_result.swapped_entity {
             let swapped_location = world.entities.get(swapped_entity).unwrap();
@@ -2712,7 +2713,7 @@ fn batch_command(mut buffer: EntityCommandBuffer) -> impl EntityCommand {
                         },
                     );
                 }
-                world.archetypes[swapped_location.archetype_id].set_entity_table_row(
+                initial_archetype.set_entity_table_row(
                     swapped_location.archetype_row,
                     initial_location.table_row,
                 );
