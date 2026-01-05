@@ -1,5 +1,5 @@
 use crate::query::DebugCheckedUnwrap;
-use alloc::alloc::{alloc, handle_alloc_error, realloc};
+use alloc::alloc::{alloc, alloc_zeroed, handle_alloc_error, realloc};
 use core::{
     alloc::Layout,
     mem::{needs_drop, size_of},
@@ -53,6 +53,16 @@ impl<T> ThinArrayPtr<T> {
         arr
     }
 
+    pub fn with_capacity_zeroed(capacity: usize) -> Self {
+        let mut arr = Self::empty();
+        if capacity > 0 {
+            // SAFETY:
+            // - The `current_capacity` is 0 because it was just created
+            unsafe { arr.alloc_zeroed(NonZeroUsize::new_unchecked(capacity)) };
+        }
+        arr
+    }
+
     /// Allocate memory for the array, this should only be used if not previous allocation has been made (capacity = 0)
     /// The caller should update their saved `capacity` value to reflect the fact that it was changed
     ///
@@ -70,6 +80,19 @@ impl<T> ThinArrayPtr<T> {
             // SAFETY:
             // - layout has non-zero size, `capacity` > 0, `size` > 0 (`size_of::<T>() != 0`)
             self.data = NonNull::new(unsafe { alloc(new_layout) })
+                .unwrap_or_else(|| handle_alloc_error(new_layout))
+                .cast();
+        }
+    }
+
+    pub fn alloc_zeroed(&mut self, capacity: NonZeroUsize) {
+        self.set_capacity(capacity.get());
+        if size_of::<T>() != 0 {
+            let new_layout = Layout::array::<T>(capacity.get())
+                .expect("layout should be valid (arithmetic overflow)");
+            // SAFETY:
+            // - layout has non-zero size, `capacity` > 0, `size` > 0 (`size_of::<T>() != 0`)
+            self.data = NonNull::new(unsafe { alloc_zeroed(new_layout) })
                 .unwrap_or_else(|| handle_alloc_error(new_layout))
                 .cast();
         }
@@ -228,7 +251,7 @@ impl<T> ThinArrayPtr<T> {
     /// - ensure that `current_len` is indeed the len of the array
     #[inline]
     unsafe fn last_element(&mut self, current_len: usize) -> Option<*mut T> {
-        (current_len != 0).then_some(self.data.as_ptr().add(current_len - 1))
+        (current_len != 0).then(|| self.data.as_ptr().add(current_len - 1))
     }
 
     /// Clears the array, removing (and dropping) Note that this method has no effect on the allocated capacity of the vector.

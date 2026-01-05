@@ -20,8 +20,12 @@ pub(crate) struct Page<U, const S: usize> {
 impl<U, const S: usize> Page<U, S> {
     pub(crate) fn new() -> Self {
         Self {
-            data: ThinArrayPtr::with_capacity(1 << S),
+            data: ThinArrayPtr::with_capacity_zeroed(Self::page_size()),
         }
+    }
+
+    const fn page_size() -> usize {
+        1 << S
     }
 
     const fn page_index(index: usize) -> usize {
@@ -58,7 +62,7 @@ impl<U, const S: usize> Page<U, S> {
 impl<U, const S: usize> Drop for Page<U, S> {
     fn drop(&mut self) {
         if core::mem::needs_drop::<U>() {
-            unsafe { self.data.drop(S, S) };
+            unsafe { self.data.drop(Self::page_size(), Self::page_size()) };
         }
     }
 }
