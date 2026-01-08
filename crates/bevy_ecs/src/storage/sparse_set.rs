@@ -10,7 +10,7 @@ use bevy_ptr::{OwningPtr, Ptr};
 use core::{cell::UnsafeCell, hash::Hash, marker::PhantomData, num::NonZero, panic::Location};
 use nonmax::{NonMaxU32, NonMaxUsize};
 
-const DEFAULT_PAGE_SIZE: usize = 6;
+const DEFAULT_PAGE_SIZE: usize = 4;
 
 #[derive(Debug)]
 pub(crate) struct Page<U, const S: usize> {
@@ -301,8 +301,11 @@ impl<I: SparseSetIndex, V, const S: usize> SparseSet<I, V, S> {
             let dense_index = self.dense.len();
             self.dense.push(value);
             self.indices.push(index.clone());
-            self.sparse
-                .insert(index, unsafe { NonMaxUsize::new_unchecked(dense_index) });
+            self.sparse.insert(
+                index,
+                // SAFETY: `Vec`s cannot be longer than `isize::MAX` (half of `usize::MAX`)
+                unsafe { NonMaxUsize::new_unchecked(dense_index) },
+            );
         }
     }
 
@@ -316,8 +319,11 @@ impl<I: SparseSetIndex, V, const S: usize> SparseSet<I, V, S> {
             let dense_index = self.dense.len();
             self.dense.push(value);
             self.indices.push(index.clone());
-            self.sparse
-                .insert(index, unsafe { NonMaxUsize::new_unchecked(dense_index) });
+            self.sparse.insert(
+                index,
+                // SAFETY: `Vec`s cannot be longer than `isize::MAX` (half of `usize::MAX`)
+                unsafe { NonMaxUsize::new_unchecked(dense_index) }
+            );
             // SAFETY: Dense index was just populated above
             unsafe { self.dense.get_unchecked_mut(dense_index) }
         }
