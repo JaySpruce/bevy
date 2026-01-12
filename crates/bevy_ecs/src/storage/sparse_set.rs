@@ -34,17 +34,17 @@ impl<U, const S: usize> Page<U, S> {
 
     pub(crate) fn contains(&self, index: usize) -> bool {
         let page_index = Self::page_index(index);
-        unsafe { self.data.get_unchecked(page_index).is_some() }
+        unsafe { self.data.get_unchecked(page_index) }.is_some()
     }
 
     pub(crate) fn get(&self, index: usize) -> Option<&U> {
         let page_index = Self::page_index(index);
-        unsafe { self.data.get_unchecked(page_index).as_ref() }
+        unsafe { self.data.get_unchecked(page_index) }.as_ref()
     }
 
     pub(crate) fn get_mut(&mut self, index: usize) -> Option<&mut U> {
         let page_index = Self::page_index(index);
-        unsafe { self.data.get_unchecked_mut(page_index).as_mut() }
+        unsafe { self.data.get_unchecked_mut(page_index) }.as_mut()
     }
 
     pub(crate) fn set(&mut self, index: usize, value: Option<U>) {
@@ -52,10 +52,9 @@ impl<U, const S: usize> Page<U, S> {
         unsafe { self.data.initialize_unchecked(page_index, value) };
     }
 
-    pub(crate) fn take(&mut self, index: usize) -> Option<U> {
+    pub(crate) fn remove(&mut self, index: usize) -> Option<U> {
         let page_index = Self::page_index(index);
-        let value = unsafe { self.data.get_unchecked_mut(page_index) };
-        core::mem::take(value)
+        unsafe { self.data.get_unchecked_mut(page_index) }.take()
     }
 }
 
@@ -82,10 +81,17 @@ pub struct ImmutableSparseArray<I: SparseSetIndex, V, const S: usize = DEFAULT_P
 macro_rules! impl_sparse_array {
     ($ty:ident) => {
         impl<I: SparseSetIndex, V, const S: usize> $ty<I, V, S> {
+            /// Returns the size of the pages of this sparse array
+            /// (i.e. how many `V` can fit in each page).
             pub const fn page_size() -> usize {
                 1 << S
             }
 
+            /// Returns the page number corresponding to the specified `index`.
+            ///
+            /// This should only need to be used in methods that specifically interact
+            /// with pages (e.g. [`Self::get_page`]). Other methods should use those methods
+            /// rather than fetching or creating pages themselves.
             const fn page_number(index: usize) -> usize {
                 index >> S
             }
@@ -95,7 +101,7 @@ macro_rules! impl_sparse_array {
                 self.pages.get(page_number).and_then(Option::as_ref)
             }
 
-            /// Returns `true` if the collection contains a value for the specified `index`.
+            /// Returns `true` if the sparse array contains a value for the specified `index`.
             #[inline]
             pub fn contains(&self, index: I) -> bool {
                 let index = index.sparse_set_index();
@@ -105,7 +111,7 @@ macro_rules! impl_sparse_array {
 
             /// Returns a reference to the value at `index`.
             ///
-            /// Returns `None` if `index` does not have a value or if `index` is out of bounds.
+            /// Returns `None` if `index` does not have a value.
             #[inline]
             pub fn get(&self, index: I) -> Option<&V> {
                 let index = index.sparse_set_index();
@@ -126,6 +132,8 @@ impl<I: SparseSetIndex, V, const S: usize> Default for SparseArray<I, V, S> {
 
 impl<I: SparseSetIndex, V, const S: usize> SparseArray<I, V, S> {
     pub const fn new() -> Self {
+        const { assert!(S < usize::BITS as usize) };
+
         Self {
             pages: Vec::new(),
             marker: PhantomData,
@@ -142,9 +150,13 @@ impl<I: SparseSetIndex, V, const S: usize> SparseArray<I, V, S> {
         if page_number >= self.pages.len() {
             self.pages.resize_with(page_number + 1, || None);
         };
+        // SAFETY: We just made sure `pages` can fit `page_number`
         unsafe { self.pages.get_unchecked_mut(page_number) }.get_or_insert_with(Page::new)
     }
 
+    /// Returns a mutable reference to the value at `index`.
+    ///
+    /// Returns `None` if `index` does not have a value.
     pub fn get_mut(&mut self, index: I) -> Option<&mut V> {
         let index = index.sparse_set_index();
         self.get_page_mut(index)
@@ -159,10 +171,7 @@ impl<I: SparseSetIndex, V, const S: usize> SparseArray<I, V, S> {
 
     pub fn remove(&mut self, index: I) -> Option<V> {
         let index = index.sparse_set_index();
-        let Some(page) = self.get_page_mut(index) else {
-            return None;
-        };
-        page.take(index)
+        self.get_page_mut(index).and_then(|page| page.remove(index))
     }
 
     pub fn clear(&mut self) {
@@ -263,6 +272,8 @@ impl<I: SparseSetIndex, V, const S: usize> Default for SparseSet<I, V, S> {
 
 impl<I: SparseSetIndex, V, const S: usize> SparseSet<I, V, S> {
     pub const fn new() -> Self {
+        const { assert!(size_of::<V>() > 0) }
+
         Self {
             sparse: SparseArray::new(),
             dense: Vec::new(),
@@ -301,11 +312,8 @@ impl<I: SparseSetIndex, V, const S: usize> SparseSet<I, V, S> {
             let dense_index = self.dense.len();
             self.dense.push(value);
             self.indices.push(index.clone());
-            self.sparse.insert(
-                index,
-                // SAFETY: `Vec`s cannot be longer than `isize::MAX` (half of `usize::MAX`)
-                unsafe { NonMaxUsize::new_unchecked(dense_index) },
-            );
+            self.sparse
+                .insert(index, unsafe { NonMaxUsize::new_unchecked(dense_index) });
         }
     }
 
@@ -319,11 +327,8 @@ impl<I: SparseSetIndex, V, const S: usize> SparseSet<I, V, S> {
             let dense_index = self.dense.len();
             self.dense.push(value);
             self.indices.push(index.clone());
-            self.sparse.insert(
-                index,
-                // SAFETY: `Vec`s cannot be longer than `isize::MAX` (half of `usize::MAX`)
-                unsafe { NonMaxUsize::new_unchecked(dense_index) }
-            );
+            self.sparse
+                .insert(index, unsafe { NonMaxUsize::new_unchecked(dense_index) });
             // SAFETY: Dense index was just populated above
             unsafe { self.dense.get_unchecked_mut(dense_index) }
         }
