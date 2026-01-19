@@ -1,3 +1,9 @@
+//! The implementation of specialization
+//! for the clone behaviors of [`Relationship`]s and [`RelationshipTarget`]s.
+//!
+//! Based on the guide by GoldsteinE:
+//! https://github.com/GoldsteinE/gh-blog/blob/master/const_deref_specialization/src/lib.md.
+
 use core::marker::PhantomData;
 
 use crate::{
@@ -135,6 +141,7 @@ pub fn clone_relationship_target<T: RelationshipTarget>(
 }
 
 #[doc(hidden)]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorTargetChildren;
 
 impl TypeLevelCloneBehaviorVariant for RelationshipCloneBehaviorTargetChildren {
@@ -149,6 +156,7 @@ impl TypeLevelCloneBehaviorVariant for RelationshipCloneBehaviorTargetChildren {
 }
 
 #[doc(hidden)]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorTargetClone<C: RelationshipTarget + Clone>(PhantomData<C>);
 
 impl<C: RelationshipTarget + Clone> TypeLevelCloneBehaviorVariant
@@ -167,6 +175,7 @@ impl<C: RelationshipTarget + Clone> TypeLevelCloneBehaviorVariant
 
 #[doc(hidden)]
 #[cfg(feature = "bevy_reflect")]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorTargetReflect<C: RelationshipTarget + Reflect + TypePath>(
     PhantomData<C>,
 );
@@ -188,6 +197,7 @@ impl<C: RelationshipTarget + Reflect + TypePath> TypeLevelCloneBehaviorVariant
 }
 
 #[doc(hidden)]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorClone<C: Component + Clone>(PhantomData<C>);
 
 impl<C: Component + Clone> TypeLevelCloneBehaviorVariant for RelationshipCloneBehaviorClone<C> {
@@ -196,6 +206,7 @@ impl<C: Component + Clone> TypeLevelCloneBehaviorVariant for RelationshipCloneBe
 
 #[doc(hidden)]
 #[cfg(feature = "bevy_reflect")]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorReflect;
 
 #[cfg(feature = "bevy_reflect")]
@@ -204,9 +215,142 @@ impl TypeLevelCloneBehaviorVariant for RelationshipCloneBehaviorReflect {
 }
 
 #[doc(hidden)]
+#[derive(PartialEq, Debug)]
 pub struct RelationshipCloneBehaviorBase;
 
 impl TypeLevelCloneBehaviorVariant for RelationshipCloneBehaviorBase {
     // Relationships currently must have a `Clone`/`Reflect`-based handler for cloning/moving logic to properly work.
     const CLONE_BEHAVIOR: ComponentCloneBehavior = ComponentCloneBehavior::Ignore;
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        component::{
+            clone_specialization::extract_clone_behavior_value, Component, ComponentCloneBehavior,
+        },
+        entity::Entity,
+        hierarchy::Children,
+        relationship::clone_specialization::{
+            RelationshipCloneBehaviorBase, RelationshipCloneBehaviorClone,
+            RelationshipCloneBehaviorTargetChildren, RelationshipCloneBehaviorTargetClone,
+            RelationshipCloneSpecialization,
+        },
+    };
+    use alloc::vec::Vec;
+    use core::marker::PhantomData;
+
+    #[test]
+    fn relationship_clone_specialization() {
+        #[derive(Component, PartialEq, Debug)]
+        #[relationship(relationship_target = ATarget)]
+        struct A(Entity);
+
+        #[derive(Component, PartialEq, Debug)]
+        #[relationship_target(relationship = A)]
+        struct ATarget(Vec<Entity>);
+
+        #[derive(Component, Clone, PartialEq, Debug)]
+        #[relationship(relationship_target = BTarget)]
+        struct B(Entity);
+
+        #[derive(Component, Clone, PartialEq, Debug)]
+        #[relationship_target(relationship = B)]
+        struct BTarget(Vec<Entity>);
+
+        let relationship_behavior_children =
+            RelationshipCloneSpecialization::<Children>::default().check();
+        let relationship_behavior_a = RelationshipCloneSpecialization::<A>::default().check();
+        let relationship_behavior_a_target =
+            RelationshipCloneSpecialization::<ATarget>::default().check();
+        let relationship_behavior_b = RelationshipCloneSpecialization::<B>::default().check();
+        let relationship_behavior_b_target =
+            RelationshipCloneSpecialization::<BTarget>::default().check();
+
+        assert_eq!(
+            RelationshipCloneBehaviorTargetChildren,
+            relationship_behavior_children
+        );
+        assert_eq!(RelationshipCloneBehaviorBase, relationship_behavior_a);
+        assert_eq!(
+            RelationshipCloneBehaviorBase,
+            relationship_behavior_a_target
+        );
+        assert_eq!(
+            RelationshipCloneBehaviorClone::<B>(PhantomData),
+            relationship_behavior_b
+        );
+        assert_eq!(
+            RelationshipCloneBehaviorTargetClone::<BTarget>(PhantomData),
+            relationship_behavior_b_target
+        );
+
+        match extract_clone_behavior_value(&|| relationship_behavior_children) {
+            ComponentCloneBehavior::Custom(_) => (),
+            _ => panic!("`relationship_behavior_children` should result in `ComponentCloneBehavior::Custom`"),
+        }
+
+        match extract_clone_behavior_value(&|| relationship_behavior_a) {
+            ComponentCloneBehavior::Ignore => (),
+            _ => panic!(
+                "`relationship_behavior_a` should result in `ComponentCloneBehavior::Ignore`"
+            ),
+        }
+
+        match extract_clone_behavior_value(&|| relationship_behavior_a_target) {
+            ComponentCloneBehavior::Ignore => (),
+            _ => panic!("`relationship_behavior_a_target` should result in `ComponentCloneBehavior::Ignore`"),
+        }
+
+        match extract_clone_behavior_value(&|| relationship_behavior_b) {
+            ComponentCloneBehavior::Custom(_) => (),
+            _ => panic!(
+                "`relationship_behavior_b` should result in `ComponentCloneBehavior::Custom`"
+            ),
+        }
+
+        match extract_clone_behavior_value(&|| relationship_behavior_b_target) {
+            ComponentCloneBehavior::Custom(_) => (),
+            _ => panic!("`relationship_behavior_b_target` should result in `ComponentCloneBehavior::Custom`"),
+        }
+    }
+
+    #[cfg(feature = "bevy_reflect")]
+    #[test]
+    fn relationship_clone_specialization_reflect() {
+        use crate::relationship::clone_specialization::{
+            RelationshipCloneBehaviorReflect, RelationshipCloneBehaviorTargetReflect,
+        };
+        use bevy_reflect::Reflect;
+
+        #[derive(Component, Reflect, PartialEq, Debug)]
+        #[relationship(relationship_target = CTarget)]
+        struct C(Entity);
+
+        #[derive(Component, Reflect, PartialEq, Debug)]
+        #[relationship_target(relationship = C)]
+        struct CTarget(Vec<Entity>);
+
+        let relationship_behavior_c = RelationshipCloneSpecialization::<C>::default().check();
+        let relationship_behavior_c_target =
+            RelationshipCloneSpecialization::<CTarget>::default().check();
+
+        assert_eq!(RelationshipCloneBehaviorReflect, relationship_behavior_c);
+        assert_eq!(
+            RelationshipCloneBehaviorTargetReflect::<CTarget>(PhantomData),
+            relationship_behavior_c_target
+        );
+
+        match extract_clone_behavior_value(&|| relationship_behavior_c) {
+            ComponentCloneBehavior::Custom(_) => (),
+            _ => panic!(
+                "`relationship_behavior_c` should result in `ComponentCloneBehavior::Custom`"
+            ),
+        }
+
+        match extract_clone_behavior_value(&|| relationship_behavior_c_target) {
+            ComponentCloneBehavior::Custom(_) => (),
+            _ => panic!("`relationship_behavior_c_target` should result in `ComponentCloneBehavior::Custom`"),
+        }
+    }
 }
