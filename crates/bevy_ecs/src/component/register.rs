@@ -216,8 +216,7 @@ impl<'w> ComponentsRegistrator<'w> {
     unsafe fn register_component_unchecked<T: Component>(&mut self, id: ComponentId) {
         // SAFETY: ensured by caller.
         unsafe {
-            self.components
-                .register_component_inner(id, ComponentDescriptor::new::<T>());
+            self.components.register_component_inner(id, T::DESCRIPTOR);
         }
         let type_id = TypeId::of::<T>();
         let prev = self.components.indices.insert(type_id, id);
@@ -571,7 +570,7 @@ impl<'w> ComponentsQueuedRegistrator<'w> {
             unsafe {
                 self.register_arbitrary_component(
                     TypeId::of::<T>(),
-                    ComponentDescriptor::new::<T>(),
+                    T::DESCRIPTOR,
                     |registrator, id, _descriptor| {
                         // SAFETY: We just checked that this is not currently registered or queued, and if it was registered since, this would have been dropped from the queue.
                         #[expect(unused_unsafe, reason = "More precise to specify.")]

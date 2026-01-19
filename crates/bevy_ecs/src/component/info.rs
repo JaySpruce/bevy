@@ -256,17 +256,27 @@ impl ComponentDescriptor {
     }
 
     /// Create a new `ComponentDescriptor` for the type `T`.
-    pub fn new<T: Component>() -> Self {
+    pub const fn new<T: Component>() -> Self {
         Self {
             name: DebugName::type_name::<T>(),
             storage_type: T::STORAGE_TYPE,
             is_send_and_sync: true,
             type_id: Some(TypeId::of::<T>()),
             layout: Layout::new::<T>(),
-            drop: needs_drop::<T>().then_some(Self::drop_ptr::<T> as _),
+            drop: if needs_drop::<T>() {
+                Some(Self::drop_ptr::<T> as _)
+            } else {
+                None
+            },
             mutable: T::Mutability::MUTABLE,
-            clone_behavior: T::clone_behavior(),
-            relationship_accessor: T::relationship_accessor().map(|v| v.accessor),
+            clone_behavior: T::CLONE_BEHAVIOR,
+            // TODO: This can be tidier once `Option::map` is stable in const contexts
+            relationship_accessor: if T::RELATIONSHIP_ACCESSOR.is_some() {
+                // SAFETY: We just checked that `T::RELATIONSHIP_ACCESSOR` is `Some`
+                Some(unsafe { T::RELATIONSHIP_ACCESSOR.unwrap_unchecked().accessor })
+            } else {
+                None
+            },
         }
     }
 
@@ -301,7 +311,7 @@ impl ComponentDescriptor {
     /// Create a new `ComponentDescriptor` for a resource.
     ///
     /// The [`StorageType`] for resources is always [`StorageType::Table`].
-    pub fn new_resource<T: Resource>() -> Self {
+    pub const fn new_resource<T: Resource>() -> Self {
         Self {
             name: DebugName::type_name::<T>(),
             // PERF: `SparseStorage` may actually be a more
@@ -310,21 +320,29 @@ impl ComponentDescriptor {
             is_send_and_sync: true,
             type_id: Some(TypeId::of::<T>()),
             layout: Layout::new::<T>(),
-            drop: needs_drop::<T>().then_some(Self::drop_ptr::<T> as _),
+            drop: if needs_drop::<T>() {
+                Some(Self::drop_ptr::<T> as _)
+            } else {
+                None
+            },
             mutable: true,
             clone_behavior: ComponentCloneBehavior::Default,
             relationship_accessor: None,
         }
     }
 
-    pub(super) fn new_non_send<T: Any>(storage_type: StorageType) -> Self {
+    pub(super) const fn new_non_send<T: Any>(storage_type: StorageType) -> Self {
         Self {
             name: DebugName::type_name::<T>(),
             storage_type,
             is_send_and_sync: false,
             type_id: Some(TypeId::of::<T>()),
             layout: Layout::new::<T>(),
-            drop: needs_drop::<T>().then_some(Self::drop_ptr::<T> as _),
+            drop: if needs_drop::<T>() {
+                Some(Self::drop_ptr::<T> as _)
+            } else {
+                None
+            },
             mutable: true,
             clone_behavior: ComponentCloneBehavior::Default,
             relationship_accessor: None,

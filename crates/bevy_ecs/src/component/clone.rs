@@ -1,7 +1,7 @@
-use core::marker::PhantomData;
-
-use crate::component::Component;
-use crate::entity::{ComponentCloneCtx, SourceComponent};
+use crate::{
+    component::Component,
+    entity::{ComponentCloneCtx, SourceComponent},
+};
 
 /// Function type that can be used to clone a component of an entity.
 pub type ComponentCloneFn = fn(&SourceComponent, &mut ComponentCloneCtx);
@@ -22,18 +22,18 @@ impl ComponentCloneBehavior {
     /// Set clone handler based on `Clone` trait.
     ///
     /// If set as a handler for a component that is not the same as the one used to create this handler, it will panic.
-    pub fn clone<C: Component + Clone>() -> Self {
+    pub const fn clone<C: Component + Clone>() -> Self {
         Self::Custom(component_clone_via_clone::<C>)
     }
 
     /// Set clone handler based on `Reflect` trait.
     #[cfg(feature = "bevy_reflect")]
-    pub fn reflect() -> Self {
+    pub const fn reflect() -> Self {
         Self::Custom(component_clone_via_reflect)
     }
 
     /// Returns the "global default"
-    pub fn global_default_fn() -> ComponentCloneFn {
+    pub const fn global_default_fn() -> ComponentCloneFn {
         #[cfg(feature = "bevy_reflect")]
         return component_clone_via_reflect;
         #[cfg(not(feature = "bevy_reflect"))]
@@ -42,7 +42,7 @@ impl ComponentCloneBehavior {
 
     /// Resolves the [`ComponentCloneBehavior`] to a [`ComponentCloneFn`]. If [`ComponentCloneBehavior::Default`] is
     /// specified, the given `default` function will be used.
-    pub fn resolve(&self, default: ComponentCloneFn) -> ComponentCloneFn {
+    pub const fn resolve(&self, default: ComponentCloneFn) -> ComponentCloneFn {
         match self {
             ComponentCloneBehavior::Default => default,
             ComponentCloneBehavior::Ignore => component_clone_ignore,
@@ -181,37 +181,3 @@ pub fn component_clone_via_reflect(source: &SourceComponent, ctx: &mut Component
 ///
 /// See [`EntityClonerBuilder`](crate::entity::EntityClonerBuilder) for details.
 pub fn component_clone_ignore(_source: &SourceComponent, _ctx: &mut ComponentCloneCtx) {}
-
-/// Wrapper for components clone specialization using autoderef.
-#[doc(hidden)]
-pub struct DefaultCloneBehaviorSpecialization<T>(PhantomData<T>);
-
-impl<T> Default for DefaultCloneBehaviorSpecialization<T> {
-    fn default() -> Self {
-        Self(PhantomData)
-    }
-}
-
-/// Base trait for components clone specialization using autoderef.
-#[doc(hidden)]
-pub trait DefaultCloneBehaviorBase {
-    fn default_clone_behavior(&self) -> ComponentCloneBehavior;
-}
-
-impl<C> DefaultCloneBehaviorBase for DefaultCloneBehaviorSpecialization<C> {
-    fn default_clone_behavior(&self) -> ComponentCloneBehavior {
-        ComponentCloneBehavior::Default
-    }
-}
-
-/// Specialized trait for components clone specialization using autoderef.
-#[doc(hidden)]
-pub trait DefaultCloneBehaviorViaClone {
-    fn default_clone_behavior(&self) -> ComponentCloneBehavior;
-}
-
-impl<C: Clone + Component> DefaultCloneBehaviorViaClone for &DefaultCloneBehaviorSpecialization<C> {
-    fn default_clone_behavior(&self) -> ComponentCloneBehavior {
-        ComponentCloneBehavior::clone::<C>()
-    }
-}

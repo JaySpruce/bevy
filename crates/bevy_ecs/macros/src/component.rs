@@ -201,18 +201,17 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
 
     let clone_behavior = if relationship_target.is_some() || relationship.is_some() {
         quote!(
-            use #bevy_ecs_path::relationship::{
-                RelationshipCloneBehaviorBase, RelationshipCloneBehaviorViaClone, RelationshipCloneBehaviorViaReflect,
-                RelationshipTargetCloneBehaviorViaClone, RelationshipTargetCloneBehaviorViaReflect, RelationshipTargetCloneBehaviorHierarchy
-                };
-            (&&&&&&&#bevy_ecs_path::relationship::RelationshipCloneBehaviorSpecialization::<Self>::default()).default_clone_behavior()
+            #bevy_ecs_path::component::clone_specialization::extract_clone_behavior_value(&|| {
+                #bevy_ecs_path::relationship::clone_specialization::RelationshipCloneSpecialization::<Self>::default().check()
+            })
         )
     } else if let Some(behavior) = attrs.clone_behavior {
         quote!(#bevy_ecs_path::component::ComponentCloneBehavior::#behavior)
     } else {
         quote!(
-            use #bevy_ecs_path::component::{DefaultCloneBehaviorBase, DefaultCloneBehaviorViaClone};
-            (&&&#bevy_ecs_path::component::DefaultCloneBehaviorSpecialization::<Self>::default()).default_clone_behavior()
+            #bevy_ecs_path::component::clone_specialization::extract_clone_behavior_value(&|| {
+                #bevy_ecs_path::component::clone_specialization::ComponentCloneSpecialization::<Self>::default().check()
+            })
         )
     };
 
@@ -251,6 +250,8 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
         #required_component_docs
         impl #impl_generics #bevy_ecs_path::component::Component for #struct_name #type_generics #where_clause {
             const STORAGE_TYPE: #bevy_ecs_path::component::StorageType = #storage;
+            const CLONE_BEHAVIOR: #bevy_ecs_path::component::ComponentCloneBehavior = #clone_behavior;
+            const RELATIONSHIP_ACCESSOR: Option<#bevy_ecs_path::relationship::ComponentRelationshipAccessor<Self>> = #relationship_accessor;
             type Mutability = #mutable_type;
             fn register_required_components(
                 _requiree: #bevy_ecs_path::component::ComponentId,
@@ -265,15 +266,7 @@ pub fn derive_component(input: TokenStream) -> TokenStream {
             #on_remove
             #on_despawn
 
-            fn clone_behavior() -> #bevy_ecs_path::component::ComponentCloneBehavior {
-                #clone_behavior
-            }
-
             #map_entities
-
-            fn relationship_accessor() -> Option<#bevy_ecs_path::relationship::ComponentRelationshipAccessor<Self>> {
-                #relationship_accessor
-            }
         }
 
         #relationship

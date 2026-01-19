@@ -12,7 +12,7 @@
 use core::any::Any;
 
 use crate::{
-    component::{ComponentCloneBehavior, ComponentId, Mutable, StorageType},
+    component::{ComponentId, Mutable, StorageType},
     entity::Entity,
     error::{ErrorContext, ErrorHandler},
     event::{Event, EventKey},
@@ -494,10 +494,6 @@ impl Component for ObservedBy {
                 }
             }
         })
-    }
-
-    fn clone_behavior() -> ComponentCloneBehavior {
-        ComponentCloneBehavior::Ignore
     }
 }
 

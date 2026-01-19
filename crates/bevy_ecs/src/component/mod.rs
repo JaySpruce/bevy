@@ -1,6 +1,7 @@
 //! Types for declaring and storing [`Component`]s.
 
 mod clone;
+pub mod clone_specialization;
 mod info;
 mod register;
 mod required;
@@ -506,9 +507,27 @@ use core::{fmt::Debug, marker::PhantomData, ops::Deref};
     label = "invalid `Component`",
     note = "consider annotating `{Self}` with `#[derive(Component)]`"
 )]
-pub trait Component: Send + Sync + 'static {
-    /// A constant indicating the storage type used for this component.
+pub trait Component: Send + Sync + Sized + 'static {
+    /// The type-erased description of this component,
+    /// stored internally when the component is registered.
+    const DESCRIPTOR: ComponentDescriptor = ComponentDescriptor::new::<Self>();
+
+    /// The storage type used for this component.
     const STORAGE_TYPE: StorageType;
+
+    /// The clone behavior used for this component,
+    /// allowing one to override the component's clone function or disable cloning altogether.
+    ///
+    /// See the [Clone Behaviors section of `EntityCloner`](crate::entity::EntityCloner#clone-behaviors)
+    /// to understand how this affects handler priority.
+    const CLONE_BEHAVIOR: ComponentCloneBehavior = ComponentCloneBehavior::Default;
+
+    /// A [`ComponentRelationshipAccessor`] required for working with relationships in dynamic contexts.
+    ///
+    /// If this component is not a [`Relationship`](crate::relationship::Relationship)
+    /// or [`RelationshipTarget`](crate::relationship::RelationshipTarget),
+    /// this should be `None`.
+    const RELATIONSHIP_ACCESSOR: Option<ComponentRelationshipAccessor<Self>> = None;
 
     /// A marker type to assist Bevy with determining if this component is
     /// mutable, or immutable. Mutable components will have [`Component<Mutability = Mutable>`],
@@ -552,14 +571,6 @@ pub trait Component: Send + Sync + 'static {
         _component_id: ComponentId,
         _required_components: &mut RequiredComponentsRegistrator,
     ) {
-    }
-
-    /// Called when registering this component, allowing to override clone function (or disable cloning altogether) for this component.
-    ///
-    /// See [Clone Behaviors section of `EntityCloner`](crate::entity::EntityCloner#clone-behaviors) to understand how this affects handler priority.
-    #[inline]
-    fn clone_behavior() -> ComponentCloneBehavior {
-        ComponentCloneBehavior::Default
     }
 
     /// Maps the entities on this component using the given [`EntityMapper`]. This is used to remap entities in contexts like scenes and entity cloning.
@@ -647,13 +658,6 @@ pub trait Component: Send + Sync + 'static {
     /// You can use the turbofish (`::<A,B,C>`) to specify parameters when a function is generic, using either M or _ for the type of the mapper parameter.
     #[inline]
     fn map_entities<E: EntityMapper>(_this: &mut Self, _mapper: &mut E) {}
-
-    /// Returns [`ComponentRelationshipAccessor`] required for working with relationships in dynamic contexts.
-    ///
-    /// If component is not a [`Relationship`](crate::relationship::Relationship) or [`RelationshipTarget`](crate::relationship::RelationshipTarget), this should return `None`.
-    fn relationship_accessor() -> Option<ComponentRelationshipAccessor<Self>> {
-        None
-    }
 }
 
 mod private {
